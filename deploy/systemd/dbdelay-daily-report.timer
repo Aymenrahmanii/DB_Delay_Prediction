@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily DB collector report at 08:00
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Europe/Berlin
+Persistent=true
+
+[Install]
+WantedBy=timers.target

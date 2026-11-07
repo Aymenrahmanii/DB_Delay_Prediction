@@ -1,0 +1,25 @@
+[Unit]
+Description=DB Timetables collector (plan, fchg, rchg)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=dbdelay
+WorkingDirectory=/opt/dbdelay
+EnvironmentFile=/opt/dbdelay/.env
+ExecStart=/opt/dbdelay/.venv/bin/dbdelay collect
+Restart=always
+RestartSec=10
+# Keep restarting forever; a crash loop shows up as gaps in `dbdelay health`.
+StartLimitIntervalSec=0
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/dbdelay/data
+
+[Install]
+WantedBy=multi-user.target

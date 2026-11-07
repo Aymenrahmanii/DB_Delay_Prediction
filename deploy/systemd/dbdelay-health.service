@@ -1,0 +1,9 @@
+[Unit]
+Description=DB collector health check (alerts on Telegram if uptime < 99 %%)
+
+[Service]
+Type=oneshot
+User=dbdelay
+WorkingDirectory=/opt/dbdelay
+EnvironmentFile=/opt/dbdelay/.env
+ExecStart=/opt/dbdelay/.venv/bin/dbdelay health --hours 1 --alert on-fail

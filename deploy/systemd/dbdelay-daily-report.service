@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily DB collector report on Telegram (sent even when healthy)
+
+[Service]
+Type=oneshot
+User=dbdelay
+WorkingDirectory=/opt/dbdelay
+EnvironmentFile=/opt/dbdelay/.env
+ExecStart=/opt/dbdelay/.venv/bin/dbdelay health --hours 24 --alert always
+# Exit code 1 means "unhealthy", already reported in the message.
+SuccessExitStatus=1
