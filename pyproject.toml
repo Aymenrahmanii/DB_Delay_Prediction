@@ -11,6 +11,7 @@ dependencies = [
     "tenacity>=8.5",
     "pydantic-settings>=2.4",
     "tzdata>=2024.1",
+    "duckdb>=1.1",
 ]
 
 [project.scripts]
@@ -25,7 +26,6 @@ dev = [
     "lxml-stubs>=0.5",
 ]
 analysis = [
-    "duckdb>=1.1",
     "polars>=1.9",
     "pyarrow>=17",
 ]
