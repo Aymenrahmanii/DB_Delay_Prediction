@@ -182,6 +182,18 @@ async def test_plan_burst_does_not_delay_live_polls(tmp_path: Path) -> None:
     assert max(live_done) < 0.15  # live polls never waited behind them
 
 
+async def test_stop_does_not_wait_for_slow_requests(tmp_path: Path) -> None:
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(3600)
+        return httpx.Response(200, content=b"<timetable/>")
+
+    settings = _settings(tmp_path)
+    async with _client(settings, httpx.MockTransport(hang)) as client:
+        collector = Collector(settings, [FRANKFURT, FULDA], client)
+        asyncio.get_running_loop().call_later(0.2, collector.stop.set)
+        await asyncio.wait_for(collector.run(), timeout=5)  # plan polls are still hanging
+
+
 async def test_health_counts_each_slot_once(tmp_path: Path) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"<timetable/>")

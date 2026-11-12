@@ -13,12 +13,15 @@ from pathlib import Path
 from lxml import etree
 
 from dbdelay.api import TimetablesClient
+from dbdelay.awake import keep_awake
 from dbdelay.collector import Collector, install_signal_handlers, utcnow
 from dbdelay.config import Settings
 from dbdelay.health import compute_health, send_telegram
 from dbdelay.lock import AlreadyRunningError, single_instance
 from dbdelay.ratelimit import RateLimiter
 from dbdelay.stations import load_stations
+
+log = logging.getLogger("dbdelay")
 
 ARCHIVE_TABLES = (
     "monthly_processed_data",
@@ -32,24 +35,30 @@ def _require_keys(settings: Settings) -> None:
         sys.exit("Set DBDELAY_DB_CLIENT_ID and DBDELAY_DB_API_KEY (see .env.example).")
 
 
-async def _collect(settings: Settings) -> None:
+async def _collect(settings: Settings, hours: float | None) -> None:
     stations = load_stations(settings.stations_file)
     limiter = RateLimiter(settings.rate_limit_per_minute)
     plan_limiter = RateLimiter(settings.plan_rate_limit_per_minute, burst=2)
     async with TimetablesClient(settings, limiter, plan_limiter=plan_limiter) as client:
         collector = Collector(settings, stations, client)
         install_signal_handlers(collector.stop)
+        if hours is not None:
+            asyncio.get_running_loop().call_later(hours * 3600, collector.stop.set)
+            log.info("will stop after %g h", hours)
         await collector.run()
 
 
-def cmd_collect(settings: Settings, _: argparse.Namespace) -> int:
+def cmd_collect(settings: Settings, args: argparse.Namespace) -> int:
     _require_keys(settings)
     try:
         with (
             single_instance(settings.data_dir / "collector.lock"),
+            keep_awake() if args.keep_awake else contextlib.nullcontext(False) as awake,
             contextlib.suppress(KeyboardInterrupt),
         ):
-            asyncio.run(_collect(settings))
+            if args.keep_awake:
+                log.info("keeping the PC awake: %s", "yes" if awake else "not supported here")
+            asyncio.run(_collect(settings, args.hours))
     except AlreadyRunningError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -120,7 +129,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("collect", help="run the collector until stopped").set_defaults(fn=cmd_collect)
+    p = sub.add_parser("collect", help="run the collector until stopped")
+    p.add_argument("--hours", type=float, help="stop on its own after this many hours")
+    p.add_argument("--keep-awake", action="store_true", help="block sleep while running (Windows)")
+    p.set_defaults(fn=cmd_collect)
 
     p = sub.add_parser("health", help="uptime and gaps from the poll log")
     p.add_argument("--hours", type=float, default=24)

@@ -38,18 +38,18 @@ uv run dbdelay collect
 uv run dbdelay health --hours 24
 ```
 
-### Run 24/7 on a Windows machine
+### A fixed-length session on a laptop
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File deploy\windows\install-tasks.ps1
-Start-ScheduledTask -TaskName dbdelay-collector
+uv run dbdelay --log-file data/logs/collector.log collect --hours 48 --keep-awake
 ```
 
-This registers two tasks for the current user: `dbdelay-collector` starts at logon and restarts
-the collector 10 s after any exit, and `dbdelay-health` writes an hourly report to
-`data\logs\health.log`. Collector logs are in `data\logs\collector-YYYY-MM-DD.log`. Stop it with
-`install-tasks.ps1 -Stop`, remove both tasks with `-Uninstall`. The machine must not sleep:
-set sleep to "Never" when plugged in, and the lid action to "Do nothing".
+`--hours` stops the collector on its own; `--keep-awake` blocks sleep only while the process is
+alive (Windows `SetThreadExecutionState`), so normal sleep returns when it exits, crashes or is
+stopped with Ctrl+C. No power settings are changed. The screen may still turn off; closing the lid
+still sleeps the machine.
+
+(`deploy\windows\install-tasks.ps1` instead registers an always-on collector as a scheduled task.)
 
 ### Deploy (Debian/Ubuntu VM)
 

@@ -219,12 +219,31 @@ class Collector:
             expected_requests_per_minute(s, len(self.stations), len(busy)),
         )
         async with asyncio.TaskGroup() as tg:
-            for st in self.stations:
-                tg.create_task(self.periodic("fchg", st, s.fchg_interval_s, fchg_offsets[st.eva]))
-            for st in busy:
-                tg.create_task(self.periodic("rchg", st, s.rchg_interval_s, rchg_offsets[st.eva]))
-            tg.create_task(self.plan_loop())
-            tg.create_task(self.report_loop())
+            tasks = [
+                *(
+                    tg.create_task(
+                        self.periodic("fchg", st, s.fchg_interval_s, fchg_offsets[st.eva])
+                    )
+                    for st in self.stations
+                ),
+                *(
+                    tg.create_task(
+                        self.periodic("rchg", st, s.rchg_interval_s, rchg_offsets[st.eva])
+                    )
+                    for st in busy
+                ),
+                tg.create_task(self.plan_loop()),
+                tg.create_task(self.report_loop()),
+            ]
+
+            async def cancel_on_stop() -> None:
+                # A plan batch can take ~16 min at 10/min; stop must not wait for it.
+                # Raw writes are synchronous, so cancelling never cuts one in half.
+                await self.stop.wait()
+                for t in tasks:
+                    t.cancel()
+
+            tg.create_task(cancel_on_stop())
         log.info("collector stopped")
 
 
