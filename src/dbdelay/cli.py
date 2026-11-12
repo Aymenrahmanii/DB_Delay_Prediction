@@ -15,6 +15,7 @@ from dbdelay.api import TimetablesClient
 from dbdelay.collector import Collector, install_signal_handlers, utcnow
 from dbdelay.config import Settings
 from dbdelay.health import compute_health, send_telegram
+from dbdelay.lock import AlreadyRunningError, single_instance
 from dbdelay.ratelimit import RateLimiter
 from dbdelay.stations import load_stations
 
@@ -33,7 +34,8 @@ def _require_keys(settings: Settings) -> None:
 async def _collect(settings: Settings) -> None:
     stations = load_stations(settings.stations_file)
     limiter = RateLimiter(settings.rate_limit_per_minute)
-    async with TimetablesClient(settings, limiter) as client:
+    plan_limiter = RateLimiter(settings.plan_rate_limit_per_minute, burst=2)
+    async with TimetablesClient(settings, limiter, plan_limiter=plan_limiter) as client:
         collector = Collector(settings, stations, client)
         install_signal_handlers(collector.stop)
         await collector.run()
@@ -41,8 +43,15 @@ async def _collect(settings: Settings) -> None:
 
 def cmd_collect(settings: Settings, _: argparse.Namespace) -> int:
     _require_keys(settings)
-    with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(_collect(settings))
+    try:
+        with (
+            single_instance(settings.data_dir / "collector.lock"),
+            contextlib.suppress(KeyboardInterrupt),
+        ):
+            asyncio.run(_collect(settings))
+    except AlreadyRunningError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

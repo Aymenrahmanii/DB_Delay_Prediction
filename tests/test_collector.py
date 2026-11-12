@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -116,3 +117,84 @@ async def test_health_counts_downtime_and_gaps(tmp_path: Path) -> None:
     assert [g[0] for g in fchg.gaps] == ["8000115"]
     assert rchg.expected == 60 and rchg.uptime == 1.0
     assert report.uptime() == pytest.approx(80 / 84)
+
+
+async def test_health_counts_from_first_start(tmp_path: Path) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<timetable/>")
+
+    settings = _settings(tmp_path)
+    started = NOW + timedelta(minutes=30)  # collector first ran halfway into the window
+    async with _client(settings, httpx.MockTransport(handle)) as client:
+        collector = Collector(settings, [FULDA], client, clock=lambda: started)
+        for k in range(6):
+            await collector.poll("fchg", FULDA, started + timedelta(minutes=5 * k))
+
+    report = compute_health(settings, [FULDA], NOW + timedelta(hours=1), hours=1)
+    fchg = next(e for e in report.endpoints if e.endpoint == "fchg")
+    assert report.counted_from == started
+    assert fchg.expected == 6 and fchg.uptime == 1.0
+    assert fchg.gaps == []
+    assert "counted from first start" in report.format()
+
+
+async def test_health_still_counts_restart_downtime(tmp_path: Path) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<timetable/>")
+
+    settings = _settings(tmp_path)
+    async with _client(settings, httpx.MockTransport(handle)) as client:
+        collector = Collector(settings, [FULDA], client, clock=lambda: NOW)
+        # Runs 12:00-12:25, down until 12:45, then runs again.
+        for k in [0, 1, 2, 3, 4, 5, 9, 10, 11]:
+            await collector.poll("fchg", FULDA, NOW + timedelta(minutes=5 * k))
+
+    report = compute_health(settings, [FULDA], NOW + timedelta(hours=1), hours=1)
+    fchg = next(e for e in report.endpoints if e.endpoint == "fchg")
+    assert report.counted_from == NOW
+    assert fchg.expected == 12 and fchg.ok == 9
+    assert len(fchg.gaps) == 1
+
+
+async def test_plan_burst_does_not_delay_live_polls(tmp_path: Path) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<timetable/>")
+
+    settings = _settings(tmp_path)
+    limiter = RateLimiter(6000, burst=100)
+    plan_limiter = RateLimiter(600, burst=1)  # 10/s
+    async with TimetablesClient(
+        settings, limiter, transport=httpx.MockTransport(handle), plan_limiter=plan_limiter
+    ) as client:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        live_done: list[float] = []
+
+        async def live() -> None:
+            await client.fchg("8000105")
+            live_done.append(loop.time() - start)
+
+        plans = [client.plan("8000105", NOW + timedelta(hours=h)) for h in range(5)]
+        await asyncio.gather(*plans, *(live() for _ in range(5)))
+        total = loop.time() - start
+
+    assert total >= 0.35  # 5 plan requests at 10/s with a burst of 1
+    assert max(live_done) < 0.15  # live polls never waited behind them
+
+
+async def test_health_counts_each_slot_once(tmp_path: Path) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<timetable/>")
+
+    settings = _settings(tmp_path)
+    async with _client(settings, httpx.MockTransport(handle)) as client:
+        collector = Collector(settings, [FULDA], client, clock=lambda: NOW)
+        for k in range(12):
+            t = NOW + timedelta(minutes=5 * k)
+            await collector.poll("fchg", FULDA, t)
+            if k < 6:  # a second collector logging the same slots
+                await collector.poll("fchg", FULDA, t)
+
+    report = compute_health(settings, [FULDA], NOW + timedelta(hours=1), hours=1)
+    fchg = next(e for e in report.endpoints if e.endpoint == "fchg")
+    assert fchg.ok == 12 and fchg.expected == 12

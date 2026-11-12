@@ -118,6 +118,17 @@ class PollLog:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(result)) + "\n")
 
+    def first_scheduled_at(self) -> datetime | None:
+        """When the very first logged poll was due: the collector's first start."""
+        for path in sorted(self.directory.glob("*.jsonl")):
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        return datetime.fromisoformat(json.loads(line)["scheduled_at"])
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+        return None
+
     def read(self, days: list[datetime]) -> Iterator[dict[str, Any]]:
         for day in days:
             path = self.file_for(day)

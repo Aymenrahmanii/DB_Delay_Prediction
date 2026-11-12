@@ -35,6 +35,7 @@ class EndpointHealth:
 class HealthReport:
     start: datetime
     end: datetime
+    counted_from: datetime
     endpoints: list[EndpointHealth]
     last_ok: datetime | None
     raw_bytes: int
@@ -48,6 +49,11 @@ class HealthReport:
         hours = (self.end - self.start).total_seconds() / 3600
         lines = [
             f"DB collector, last {hours:.0f} h (to {self.end:%Y-%m-%d %H:%M} UTC)",
+            *(
+                [f"counted from first start {self.counted_from:%Y-%m-%d %H:%M} UTC"]
+                if self.counted_from > self.start
+                else []
+            ),
             f"uptime {self.uptime():.2%}, raw written {self.raw_bytes / 1e6:.1f} MB",
             f"last successful poll: {self.last_ok:%Y-%m-%d %H:%M:%S}"
             if self.last_ok
@@ -77,7 +83,11 @@ def compute_health(
     settings: Settings, stations: list[Station], end: datetime, hours: float
 ) -> HealthReport:
     start = end - timedelta(hours=hours)
-    window_s = (end - start).total_seconds()
+    log = PollLog(settings.poll_log_dir)
+    # Time before the collector ever ran is not downtime; restarts after it are.
+    first = log.first_scheduled_at()
+    counted_from = min(max(start, first), end) if first is not None else start
+    window_s = (end - counted_from).total_seconds()
     busy = [s for s in stations if s.busy]
     intervals = {"fchg": settings.fchg_interval_s, "rchg": settings.rchg_interval_s}
     expected = {
@@ -91,11 +101,17 @@ def compute_health(
     last_ok: datetime | None = None
     raw_bytes = 0
 
-    for row in PollLog(settings.poll_log_dir).read(_days(start, end)):
+    seen: set[tuple[str, str, str, str | None]] = set()
+    for row in log.read(_days(start, end)):
         t = datetime.fromisoformat(row["scheduled_at"])
         if not start <= t < end:
             continue
         ep = row["endpoint"]
+        # Two collectors writing to one log would count every slot twice.
+        slot_key = (ep, row["eva"], row["scheduled_at"], row.get("slot"))
+        if slot_key in seen and ep != "plan":
+            continue
+        seen.add(slot_key)
         raw_bytes += int(row.get("bytes", 0))
         if row["ok"]:
             ok[ep] += 1
@@ -111,7 +127,7 @@ def compute_health(
         tolerance = timedelta(seconds=2 * interval)
         for st in stations if ep == "fchg" else busy:
             times = sorted(ok_times.get((ep, st.eva), []))
-            points = [start, *times, end]
+            points = [counted_from, *times, end]
             for a, b in itertools.pairwise(points):
                 if b - a > tolerance:
                     h.gaps.append((st.eva, a, b))
@@ -120,7 +136,7 @@ def compute_health(
     endpoints.append(
         EndpointHealth("plan", ok["plan"] + failed["plan"], ok["plan"], failed["plan"])
     )
-    return HealthReport(start, end, endpoints, last_ok, raw_bytes)
+    return HealthReport(start, end, counted_from, endpoints, last_ok, raw_bytes)
 
 
 def send_telegram(settings: Settings, text: str) -> None:

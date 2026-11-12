@@ -52,9 +52,13 @@ class TimetablesClient:
         settings: Settings,
         limiter: RateLimiter,
         transport: httpx.AsyncBaseTransport | None = None,
+        plan_limiter: RateLimiter | None = None,
     ) -> None:
         self._settings = settings
         self._limiter = limiter
+        # /plan also passes this tighter limiter first, so a burst of plan fetches
+        # (160 at startup) cannot starve the live /fchg and /rchg polls.
+        self._plan_limiter = plan_limiter
         self._client = httpx.AsyncClient(
             base_url=settings.base_url,
             headers={
@@ -77,7 +81,7 @@ class TimetablesClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def get(self, path: str) -> Response:
+    async def get(self, path: str, extra_limiter: RateLimiter | None = None) -> Response:
         """GET with rate limiting and retries on 429/5xx/network errors.
 
         Non-retryable statuses (e.g. 401, 404) are returned, not raised. After the last
@@ -95,6 +99,8 @@ class TimetablesClient:
             async for attempt in retrying:
                 with attempt:
                     attempts += 1
+                    if extra_limiter is not None:
+                        await extra_limiter.acquire()
                     await self._limiter.acquire()
                     resp = await self._client.get(path)
                     if resp.status_code in RETRY_STATUS:
@@ -110,7 +116,7 @@ class TimetablesClient:
         )
 
     async def plan(self, eva: str, slot: datetime) -> Response:
-        return await self.get(plan_path(eva, slot))
+        return await self.get(plan_path(eva, slot), self._plan_limiter)
 
     async def fchg(self, eva: str) -> Response:
         return await self.get(f"/fchg/{eva}")

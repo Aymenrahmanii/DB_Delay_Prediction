@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     stations_file: Path | None = None  # None = the bundled list
 
     rate_limit_per_minute: int = Field(default=50, ge=1)
+    plan_rate_limit_per_minute: int = Field(default=10, ge=1)
     request_timeout_s: float = 20.0
     max_attempts: int = Field(default=4, ge=1)
 
