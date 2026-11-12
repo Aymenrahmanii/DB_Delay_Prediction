@@ -8,6 +8,7 @@ import contextlib
 import logging
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from lxml import etree
 
@@ -114,6 +115,9 @@ def cmd_archive_schema(_: Settings, args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dbdelay")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--log-file", type=Path, help="append logs to this file (UTF-8) instead of stderr"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("collect", help="run the collector until stopped").set_defaults(fn=cmd_collect)
@@ -134,12 +138,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.set_defaults(fn=cmd_archive_schema)
 
     args = parser.parse_args(argv)
+    if args.log_file is not None:
+        args.log_file.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        filename=args.log_file,
+        encoding="utf-8",
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    code: int = args.fn(Settings(), args)
+    try:
+        code: int = args.fn(Settings(), args)
+    except Exception:
+        # With --log-file nobody sees stderr, so a crash must land in the log too.
+        logging.getLogger("dbdelay").exception("%s failed", args.command)
+        raise
     return code
 
 
