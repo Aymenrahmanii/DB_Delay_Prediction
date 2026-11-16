@@ -368,6 +368,107 @@ def cmd_score(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_freeze(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay.final import FROZEN_FILE, freeze
+    from dbdelay.model import latest_run_id
+
+    runs_dir = settings.data_dir / "runs"
+    run_id = args.run or latest_run_id(runs_dir)
+    if run_id is None:
+        sys.exit("no recorded run to freeze; run dbdelay train")
+    today = utcnow().astimezone(BERLIN).date()
+    try:
+        frozen = freeze(runs_dir, run_id, FROZEN_FILE, today, args.note or "")
+    except FileExistsError as exc:
+        sys.exit(str(exc))
+    print(
+        f"froze run {frozen.run_id} ({len(frozen.files)} files fingerprinted) in {FROZEN_FILE}; "
+        f"the final test starts {frozen.test_from}. Commit {FROZEN_FILE} now."
+    )
+    return 0
+
+
+def cmd_final(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay import baselines as bl
+    from dbdelay.final import FROZEN_FILE, final_scores, load_frozen, markdown, write_result
+    from dbdelay.ops import update_tables
+
+    results_dir = Path(args.results)
+    if (results_dir / "final.json").exists() and not args.force:
+        sys.exit(
+            f"{results_dir / 'final.json'} exists: the final test runs once "
+            "(--force re-runs it and says so in the results)"
+        )
+    runs_dir = settings.data_dir / "runs"
+    frozen = load_frozen(Path(args.frozen) if args.frozen else FROZEN_FILE, runs_dir)
+    test_to = (
+        date.fromisoformat(args.to)
+        if args.to
+        else (utcnow().astimezone(BERLIN).date() - timedelta(days=1))
+    )
+    start = date.fromisoformat(frozen.test_from)
+    if test_to < start:
+        sys.exit(f"the final test starts {start}; nothing to score before that")
+    days = [start + timedelta(days=k) for k in range((test_to - start).days + 1)]
+    if not args.no_update:
+        rebuilt = update_tables(settings, days)
+        if rebuilt:
+            print(f"updated tables for {', '.join(rebuilt)}")
+    result = final_scores(
+        frozen,
+        runs_dir,
+        load_stations(settings.stations_file),
+        bl.Paths(_tables_dir(settings), settings.poll_log_dir),
+        sorted((settings.data_dir / "archive").glob("stops-*.parquet")),
+        test_to,
+        forced=args.force,
+    )
+    j, md = write_result(results_dir, result)
+    print(markdown(result))
+    print(f"wrote {j} and {md}")
+    return 0
+
+
+def cmd_bundle(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay.bundle import make_bundle
+    from dbdelay.final import FROZEN_FILE, load_frozen, run_files
+
+    runs_dir = settings.data_dir / "runs"
+    frozen = load_frozen(FROZEN_FILE, runs_dir)
+    out, size = make_bundle(
+        settings.data_dir, FROZEN_FILE, run_files(runs_dir, frozen.run_id), Path(args.out)
+    )
+    print(f"wrote {out} ({size / 1e6:.1f} MB); nothing was uploaded")
+    return 0
+
+
+def cmd_reproduce(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay import baselines as bl
+    from dbdelay.bundle import open_bundle
+    from dbdelay.final import final_scores, load_frozen, markdown
+
+    data_dir, frozen_file, expected = open_bundle(Path(args.bundle), Path(args.into))
+    runs_dir = data_dir / "runs"
+    frozen = load_frozen(frozen_file, runs_dir)
+    result = final_scores(
+        frozen,
+        runs_dir,
+        load_stations(settings.stations_file),
+        bl.Paths(data_dir / "tables", data_dir / "polls"),
+        sorted((data_dir / "archive").glob("stops-*.parquet")),
+        date.fromisoformat(expected["test_to"]) if expected else date.fromisoformat(args.to),
+    )
+    print(markdown(result))
+    if expected:
+        same = all(
+            abs(a["mae_model"] - b["mae_model"]) < 1e-6 and a["n"] == b["n"]
+            for a, b in zip(result.horizons, expected["horizons"], strict=True)
+        )
+        print("matches the published results" if same else "DIFFERS from the published results")
+        return 0 if same else 1
+    return 0
+
+
 def _f(v: float | None) -> str:
     return f"{v:6.2f}" if v is not None else "     -"
 
@@ -479,6 +580,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("score", help="score finished days of logged forecasts (scoreboard)")
     p.add_argument("--source", choices=["live", "replay"], default="live")
     p.set_defaults(fn=cmd_score)
+
+    p = sub.add_parser("freeze", help="fingerprint the model run to publish (frozen.json)")
+    p.add_argument("--run", help="run id (default: the latest)")
+    p.add_argument("--note", help="a line saying why this run")
+    p.set_defaults(fn=cmd_freeze)
+
+    p = sub.add_parser("final", help="score the frozen model once on the fresh test days")
+    p.add_argument("--to", help="last test day, Berlin (default: yesterday)")
+    p.add_argument("--results", default="results")
+    p.add_argument("--frozen", help="frozen.json to use (default: ./frozen.json)")
+    p.add_argument("--force", action="store_true", help="re-run; recorded in the results")
+    p.add_argument("--no-update", action="store_true", help="do not update the tables first")
+    p.set_defaults(fn=cmd_final)
+
+    p = sub.add_parser("bundle", help="zip the data and models needed to repeat the final test")
+    p.add_argument("--out", default="dist/dbdelay-final-data.zip")
+    p.set_defaults(fn=cmd_bundle)
+
+    p = sub.add_parser("reproduce", help="repeat the final test from a data bundle")
+    p.add_argument("bundle")
+    p.add_argument("--into", default="reproduce", help="folder to unpack the bundle into")
+    p.add_argument("--to", help="last test day, if the bundle has no published results")
+    p.set_defaults(fn=cmd_reproduce)
 
     p = sub.add_parser("baselines", help="actual times, snapshots and baseline errors")
     p.add_argument("--by-hour", action="store_true", help="also break errors down by hour")

@@ -1,0 +1,15 @@
+{
+  "run_id": "20261116T160617Z",
+  "frozen_at": "2026-11-16T17:56:58+00:00",
+  "test_from": "2026-11-17",
+  "files": {
+    "20261116T160617Z.json": "4d14257d2dd0b41642400559334539b5cfb92144355d556ce7ca36f5808f6cb4",
+    "20261116T160617Z.without_db.q10.lgb.txt": "be505a7e1e17ddccbce6dcb2f8ad18d49e1488c3faf76b9b78bcdd74061b6c5c",
+    "20261116T160617Z.without_db.q50.lgb.txt": "ee259614505a189e6741a9a6ad594bd11860e5b62d3f514efc41ae05ad1e8793",
+    "20261116T160617Z.without_db.q90.lgb.txt": "cc8a107a2c389010042c82ffc6fa8ad265f218151fc627552c6920d45d92c43f",
+    "20261116T160617Z.with_db.q10.lgb.txt": "3fff195de04346b82e2ab4ebb1fcea93c70983e97b7fd15b02f70239464a2ba5",
+    "20261116T160617Z.with_db.q50.lgb.txt": "11be93afd17b0920a363e83f85d514bbd02fae6b51ece27c52af7ba6a4d99df2",
+    "20261116T160617Z.with_db.q90.lgb.txt": "71797493dbdd6a2a0255e96f0588ed1ac834958c43a96e819231315cb9fbe03b"
+  },
+  "note": "week-5 quantile models (without_db, with_db) trained on archive Jul-Oct 2026; validated from 2026-10-18"
+}

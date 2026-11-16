@@ -3,7 +3,20 @@
 Predict how late a Deutsche Bahn long-distance train (ICE, IC, EC) will be at its next stops,
 15–90 minutes ahead, and score it against DB's own forecast published at the same moment.
 
-> Status: **week 7: scoreboard and operations.** Results table goes here in week 8.
+> Status: **model frozen on 16 November 2026; final test running on fresh days.**
+
+## Results
+
+Final numbers come from `dbdelay final` on days after the freeze; they replace this section
+when the test is done (`results/final.md`). Development numbers (12–16 November, mean absolute
+error of the arrival delay in minutes, forecasts made h minutes before the actual arrival):
+
+| Horizon | Persistence | DB's forecast | Model with DB | vs DB (95 % CI) | 80 % range covers |
+|---|---:|---:|---:|---:|---:|
+| 15 min | 4.91 | **2.10** | 2.23 | −6.1 % (−7.6, −4.7) | 79.9 % |
+| 30 min | 5.69 | **3.11** | 3.13 | −0.6 % (−2.1, +0.7) | 79.8 % |
+| 60 min | 7.67 | 5.13 | **4.80** | +6.4 % (+4.6, +8.0) | 81.5 % |
+| 90 min | 9.37 | 7.13 | **6.25** | +12.3 % (+10.5, +14.1) | 81.1 % |
 
 ## Week 1: the collector
 
@@ -271,6 +284,46 @@ This agrees with the week-5 offline evaluation (−6.1 / −0.6 / +6.4 / +12.3 %
 code builds the same features as training. For "more than 5 minutes late", the model catches
 more late arrivals than DB (recall 0.85 vs 0.69 at 90 min on 13 November) but raises more
 false alarms (precision 0.88 vs 0.96): DB's forecast is optimistic, the model's less so.
+
+## Week 8: frozen model, one final test
+
+```bash
+uv run dbdelay freeze --run 20261116T160617Z   # done 16 Nov 2026: frozen.json, in git
+uv run dbdelay collect --hours 48 --keep-awake  # fresh days from 17 Nov
+uv run dbdelay final                            # once: results/final.json and final.md
+uv run dbdelay bundle                           # dist/dbdelay-final-data.zip (not uploaded)
+uv run dbdelay reproduce dist/dbdelay-final-data.zip   # anyone: same numbers from the zip
+```
+
+The days 12–16 November were looked at all through development, so they are not the final
+test. The model was frozen on 16 November: `frozen.json` records the run and a SHA-256 of
+each model file, and the final test only counts days from 17 November. `dbdelay final`
+checks the fingerprints, scores those days once with the definitions above (with trip-level
+95 % intervals) and refuses to run a second time without `--force`, which the results then
+state. The site serves the frozen model and stops switching to newer runs.
+
+A dry run of `final` on the development days reproduces the week-5 numbers exactly from the
+frozen files.
+
+### Failure cases (development days, "with DB" model, 60 min ahead)
+
+- **On-time trains.** When the train arrives less than 5 min late, the model is worse than
+  DB (2.7 vs 1.9 min): it leans late on average by 2 min. That is the cost of correcting DB's
+  optimism, which pays off on late trains (30–60 min late: 8.0 vs 9.5 min).
+- **New disruptions.** The largest misses are incidents after the forecast: ICE 118 at
+  Dortmund (14 Nov) was 5 min late in DB's forecast and 8 in the model's, and arrived 70 min
+  late. Nothing in the data shows it coming.
+- **Recoveries.** The opposite: ICE 1068 at Stuttgart (16 Nov), DB +87, model +98, arrival
+  +27; the coupled ICE 847/857 at Braunschweig (15 Nov), +52 and +60, arrival +9.
+- **Concentration.** The worst 5 % of forecasts make up 25 % of the total error.
+- **Ranges for big delays.** The 80 % range covers 85 % of arrivals under 15 min late but
+  76 % of those later than that: the ranges are too narrow when things go badly.
+- **Quiet days.** The gain over DB is on busy weekdays (90 min: +15 to +19 % on Thursday,
+  Friday, Monday) and close to zero on the weekend.
+
+Limits named in the write-up: the actual time is DB's last published time before arrival,
+not a measured one (moved afterwards for 0.5 % of stops); 40 stations only; the test covers
+days, not the weeks the plan aimed for, because the collector runs on a laptop.
 
 ### The archive
 

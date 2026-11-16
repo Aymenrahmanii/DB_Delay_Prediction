@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from dbdelay.config import Settings
+from dbdelay.final import FROZEN_FILE, load_frozen
 from dbdelay.live import LiveState, Prediction, StopView, berlin, log_predictions, predict
 from dbdelay.model import QuantileModel, load_run
 from dbdelay.parse import split_stop_id
@@ -208,7 +209,10 @@ def build_live(
     settings: Settings, run_id: str | None = None, replay_at: datetime | None = None
 ) -> Live:
     stations = load_stations(settings.stations_file)
-    run, models = load_run(settings.data_dir / "runs", run_id)
+    runs_dir = settings.data_dir / "runs"
+    if run_id is None and FROZEN_FILE.exists():
+        run_id = load_frozen(FROZEN_FILE, runs_dir).run_id  # the published model
+    run, models = load_run(runs_dir, run_id)
     return Live(
         state=LiveState(settings.raw_dir, stations),
         models=models,

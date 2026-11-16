@@ -15,6 +15,7 @@ from pathlib import Path
 
 from dbdelay import baselines as bl
 from dbdelay.config import BERLIN, Settings
+from dbdelay.final import FROZEN_FILE
 from dbdelay.model import latest_run_id, load_run
 from dbdelay.score import DayScore, save_score, score_day
 from dbdelay.site import Live, build_live
@@ -75,6 +76,19 @@ def _newer_raw(raw_dir: Path, events_file: Path, day: str) -> bool:
     return max(f.stat().st_mtime for f in files) > events_file.stat().st_mtime
 
 
+def update_tables(settings: Settings, days: list[date]) -> list[str]:
+    """Rebuilds the collector tables for the UTC days around the given Berlin days whose raw
+    data is newer than their table; returns the days rebuilt."""
+    tables = settings.data_dir / "tables"
+    utc = sorted({d for day in days for d in _utc_days(day)})
+    stale = [
+        d for d in utc if _newer_raw(settings.raw_dir, tables / "change_events" / f"{d}.parquet", d)
+    ]
+    if stale:
+        build_tables(settings.raw_dir, tables, stale)
+    return stale
+
+
 def score_pending(settings: Settings, source: str, today: date) -> list[DayScore]:
     """Scores every day before ``today`` with forecasts and no score: updates the collector
     tables for that day, then scores it."""
@@ -110,6 +124,8 @@ def maintain(live: Live) -> None:
     if now.hour >= SCORE_AFTER_HOUR and live.scored_on != today:
         score_pending(settings, live.source, now.date())
         live.scored_on = today
+    if FROZEN_FILE.exists():
+        return  # the frozen model stays until the final test is done
     runs_dir = settings.data_dir / "runs"
     latest = latest_run_id(runs_dir)
     if latest and latest != live.run_id:
