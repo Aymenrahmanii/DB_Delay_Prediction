@@ -45,7 +45,8 @@ def sample(tmp_path: Path) -> str:
         f"""copy (select id, ride as train_line_ride_id, stop as train_line_station_num,
             eva, station_name, train_type, train_number, arrival_planned_time,
             arrival_change_time, departure_planned_time, departure_change_time,
-            arrival_is_canceled, departure_is_canceled from t)
+            arrival_is_canceled, departure_is_canceled,
+            'L' || ride as line_number, false as is_additional_stop from t)
             to '{path.as_posix()}' (format parquet)"""
     )
     return path.as_posix()

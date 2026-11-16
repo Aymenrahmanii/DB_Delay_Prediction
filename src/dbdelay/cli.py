@@ -1,4 +1,4 @@
-"""Command line: `dbdelay collect | health | stations-verify | archive-schema`."""
+"""Command line: `dbdelay collect | health | build-tables | trip | check | ...`."""
 
 from __future__ import annotations
 
@@ -7,15 +7,18 @@ import asyncio
 import contextlib
 import logging
 import sys
+import time
 from collections.abc import Sequence
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import duckdb
 from lxml import etree
 
 from dbdelay.api import TimetablesClient
 from dbdelay.awake import keep_awake
 from dbdelay.collector import Collector, install_signal_handlers, utcnow
-from dbdelay.config import Settings
+from dbdelay.config import BERLIN, Settings
 from dbdelay.health import compute_health, send_telegram
 from dbdelay.lock import AlreadyRunningError, single_instance
 from dbdelay.ratelimit import RateLimiter
@@ -121,6 +124,110 @@ def cmd_archive_schema(_: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _tables_dir(settings: Settings) -> Path:
+    return settings.data_dir / "tables"
+
+
+def cmd_build_tables(settings: Settings, _: argparse.Namespace) -> int:
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError:
+        sys.exit("Install the analysis group: uv sync --group analysis")
+    from dbdelay.tables import build_tables
+
+    started = time.monotonic()
+    stats = build_tables(settings.raw_dir, _tables_dir(settings))
+    print(
+        f"plan responses {stats.plan_records}, change responses {stats.change_records}, "
+        f"unparseable {stats.bad_records}\n"
+        f"planned long-distance stops {stats.planned_stops}, change events "
+        f"{stats.change_events} (repeats dropped: {stats.repeated_fetches}, "
+        f"same-instant conflicts: {stats.same_instant_conflicts})\n"
+        f"days {', '.join(stats.days)}; wrote {_tables_dir(settings)} "
+        f"in {time.monotonic() - started:.0f} s"
+    )
+    return 0
+
+
+def _fmt_time(t: datetime | None) -> str:
+    return f"{t:%H:%M}" if t else "  -  "
+
+
+def _fmt_delay(d: float | None) -> str:
+    return f"{d:+4.0f}" if d is not None else "    "
+
+
+def cmd_trip(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay import stops as st
+    from dbdelay.archive import archive_url, connect
+
+    if args.date is None:
+        args.date = utcnow().astimezone(BERLIN).date().isoformat()
+    if args.source == "archive":
+        source = args.archive or archive_url(args.date[:7])
+        con = connect(source)
+        sql = st.archive_stops_sql(source, long_distance_only=False)
+    else:
+        con = duckdb.connect()
+        sql = st.collector_stops_sql(
+            _tables_dir(settings), load_stations(settings.stations_file), long_distance_only=False
+        )
+    if args.trip_key:
+        keys = [args.trip_key]
+    else:
+        trips = st.find_trips(con, sql, args.train, args.date)
+        if not trips:
+            print(f"no trip of {args.train} on {args.date} in the {args.source} data")
+            return 1
+        if len(trips) > 1:
+            print(f"{len(trips)} trips of {args.train} on {args.date}:")
+            for t in trips:
+                print(
+                    f"  {t['trip_key']}  {t['first_planned']:%H:%M}-{t['last_planned']:%H:%M}"
+                    f"  {t['stops']} stops"
+                )
+        keys = [t["trip_key"] for t in trips]
+    for key in keys:
+        rows = st.trip_stops(con, sql, key)
+        if not rows:
+            print(f"no stops for trip {key}")
+            continue
+        r0 = rows[0]
+        print(f"\n{r0['train_type']} {r0['train_number']}  trip {key}  ({args.source})")
+        print(" #  station                       arr  changed delay   dep  changed delay  notes")
+        for r in rows:
+            flags = (
+                ("cancelled", r["canceled"]),
+                ("added", r["is_added"]),
+                ("diversion", r["is_diversion"]),
+                ("platform changed", r["platform_changed"]),
+                ("not observed", r.get("observed") is False),
+            )
+            notes = ", ".join(n for n, flag in flags if flag)
+            print(
+                f"{r['stop_num']:>2}  {(r['station_name'] or r['eva'])[:28]:<28}  "
+                f"{_fmt_time(r['arr_planned'])}  {_fmt_time(r['arr_changed'])}  "
+                f"{_fmt_delay(r['arr_delay_min'])}   {_fmt_time(r['dep_planned'])}  "
+                f"{_fmt_time(r['dep_changed'])}  {_fmt_delay(r['dep_delay_min'])}  {notes}"
+            )
+    return 0
+
+
+def cmd_check(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay.checks import check_day
+
+    if args.date:
+        day = date.fromisoformat(args.date)
+    else:
+        day = utcnow().astimezone(BERLIN).date() - timedelta(days=1)
+    stations = load_stations(settings.stations_file)
+    results = check_day(duckdb.connect(), settings, stations, _tables_dir(settings), day)
+    print(f"checks for {day}")
+    for r in results:
+        print("  " + r.format())
+    return 1 if any(not r.ok and r.level == "error" for r in results) else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dbdelay")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -148,6 +255,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--month", default="2026-10")
     p.add_argument("--sample", type=int, default=0)
     p.set_defaults(fn=cmd_archive_schema)
+
+    sub.add_parser("build-tables", help="parse the raw archive into Parquet tables").set_defaults(
+        fn=cmd_build_tables
+    )
+
+    p = sub.add_parser("trip", help="one trip stop by stop, planned and changed times")
+    p.add_argument("train", nargs="?", default="", help='e.g. "ICE 597"')
+    p.add_argument("--date", help="YYYY-MM-DD (Berlin); default today")
+    p.add_argument("--trip-key", help="exact trip key instead of train and date")
+    p.add_argument("--source", choices=["collector", "archive"], default="collector")
+    p.add_argument("--archive", help="archive Parquet path or URL (default: the month's file)")
+    p.set_defaults(fn=cmd_trip)
+
+    p = sub.add_parser("check", help="data checks on one day of the collector tables")
+    p.add_argument("--date", help="YYYY-MM-DD (Berlin); default yesterday")
+    p.set_defaults(fn=cmd_check)
 
     args = parser.parse_args(argv)
     if args.log_file is not None:

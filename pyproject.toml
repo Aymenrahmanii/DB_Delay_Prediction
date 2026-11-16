@@ -52,7 +52,7 @@ files = ["src", "tests"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["duckdb.*"]
+module = ["duckdb.*", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
