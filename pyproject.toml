@@ -26,6 +26,7 @@ dev = [
     "lxml-stubs>=0.5",
 ]
 analysis = [
+    "lightgbm>=4.7.0",
     "polars>=1.9",
     "pyarrow>=17",
 ]

@@ -3,7 +3,7 @@
 Predict how late a Deutsche Bahn long-distance train (ICE, IC, EC) will be at its next stops,
 15–90 minutes ahead, and score it against DB's own forecast published at the same moment.
 
-> Status: **week 3: ground truth and baselines.** Results table goes here in week 8.
+> Status: **week 4: first model.** Results table goes here in week 8.
 
 ## Week 1: the collector
 
@@ -135,6 +135,40 @@ Mean absolute error of the arrival delay, minutes, 12–16 November 2026, 40 sta
 DB's forecast is optimistic: trains arrive on average 1.1 min later than DB said 15 minutes
 before, and 6.0 min later 90 minutes before. Measured back from the *planned* arrival instead,
 DB's error is 4.0 / 5.2 / 7.2 / 8.9 min.
+
+## Week 4: first model
+
+```bash
+uv sync --group analysis
+uv run dbdelay archive-pull 2026-06 2026-07 2026-08 2026-09 2026-10   # ~1 min a month
+uv run dbdelay train      # trains on July-October, scores on the collected days
+```
+
+One LightGBM model (L1 loss, the median) predicts the arrival delay at a coming collected
+stop from what is known at the moment t: the delay leaving the last collected stop and how
+it changed, planned time left, time since that departure, stations, train type, hour,
+weekday, and this train's delay at this station over the previous 28 days. No DB forecast
+yet (week 5). Split by date: train July to 17 October, validate (early stopping) 18–31
+October, test on the collected days, which the model never sees. Each run is recorded in
+`data/runs/<run id>.json` with the model next to it.
+
+Training moments sit on a 15-minute clock grid while the train is running and not yet
+arrived. An earlier version picked them as "actual arrival − h" and leaked the answer
+(h − planned time left = delay): it looked 53 % better than DB and was wrong. A test now
+checks that the moments and their features do not depend on the outcome.
+
+Mean absolute error, minutes, same rows as the baselines (12–16 November):
+
+| Horizon | Persistence | DB's forecast | Model | Model vs persistence |
+|---|---:|---:|---:|---:|
+| 15 min | 4.91 | **2.10** | 3.61 | −26 % |
+| 30 min | 5.69 | **3.11** | 4.80 | −16 % |
+| 60 min | 7.67 | **5.13** | 6.64 | −13 % |
+| 90 min | 9.37 | **7.13** | 8.34 | −11 % |
+
+The model beats persistence at every horizon but not DB, which knows far more than delays at
+40 stations. 59 % of the model's gain comes from the current delay, then the stations and the
+train's own history.
 
 ### The archive
 

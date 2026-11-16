@@ -11,6 +11,7 @@ rather than a real time. They are counted and flagged (``midnight_placeholder``)
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -71,3 +72,19 @@ def quality_report(con: duckdb.DuckDBPyConnection, source: str) -> dict[str, flo
         "implausible_over_12h",
     ]
     return {k: float(v) for k, v in zip(keys, row, strict=True)}
+
+
+def pull_month(month: str, evas: list[str], out_dir: Path) -> tuple[Path, int]:
+    """Save one month of long-distance stops at the given stations as a local Parquet file,
+    in the shared stop schema, so training does not re-read the remote archive."""
+    src = archive_url(month)
+    con = connect(src)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"stops-{month}.parquet"
+    in_list = ", ".join(stops.literal(e) for e in evas)
+    con.execute(
+        f"""copy (select * from ({stop_delays_sql(src)}) s where eva in ({in_list}))
+            to {stops.literal(out.as_posix())} (format parquet)"""
+    )
+    row = con.execute(f"select count(*) from {stops.literal(out.as_posix())}").fetchone()
+    return out, int(row[0]) if row else 0

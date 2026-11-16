@@ -228,6 +228,66 @@ def cmd_check(settings: Settings, args: argparse.Namespace) -> int:
     return 1 if any(not r.ok and r.level == "error" for r in results) else 0
 
 
+def cmd_archive_pull(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay.archive import pull_month
+
+    evas = [s.eva for s in load_stations(settings.stations_file)]
+    for month in args.months:
+        started = time.monotonic()
+        out, n = pull_month(month, evas, settings.data_dir / "archive")
+        print(f"{month}: {n} stops -> {out} ({time.monotonic() - started:.0f} s)")
+    return 0
+
+
+def cmd_train(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay import baselines as bl
+    from dbdelay import model as m
+    from dbdelay.features import FEATURES
+
+    archive_dir = settings.data_dir / "archive"
+    train_files = [archive_dir / f"stops-{mo}.parquet" for mo in args.months]
+    history = sorted(archive_dir.glob("stops-*.parquet"))
+    missing = [f for f in train_files if not f.exists()]
+    if missing:
+        sys.exit(f"missing {', '.join(map(str, missing))}; run dbdelay archive-pull first")
+    stations = load_stations(settings.stations_file)
+    valid_from = date.fromisoformat(args.valid_from)
+
+    started = time.monotonic()
+    booster, info = m.train(duckdb.connect(), stations, train_files, history, valid_from)
+    print(
+        f"trained on {info['rows_train']} rows, validated on {info['rows_valid']} "
+        f"(from {valid_from}): MAE {info['valid_mae']:.2f} min at iteration "
+        f"{info['best_iteration']} ({time.monotonic() - started:.0f} s)"
+    )
+    paths = bl.Paths(_tables_dir(settings), settings.poll_log_dir)
+    test = m.score_on_collector(duckdb.connect(), booster, stations, paths, history)
+
+    print("\ncollected days, mean absolute error of the arrival delay, minutes (same rows)")
+    print("horizon       n  persistence      DB   model   model vs DB")
+    for r in test:
+        gain = 1 - r["mae_model"] / r["mae_db"]
+        print(
+            f"{r['horizon']:>4} min {r['n']:>7}       {_f(r['mae_persistence'])}  "
+            f"{_f(r['mae_db'])}  {_f(r['mae_model'])}   {gain:+.1%}"
+        )
+    record = m.RunRecord(
+        run_id=m.new_run_id(),
+        train_files=[f.name for f in train_files],
+        valid_from=valid_from.isoformat(),
+        rows_train=info["rows_train"],
+        rows_valid=info["rows_valid"],
+        rows_test=sum(r["n"] for r in test),
+        features=list(FEATURES),
+        params=m.PARAMS,
+        best_iteration=info["best_iteration"],
+        valid_mae=info["valid_mae"],
+        test=test,
+    )
+    print(f"\nrun recorded in {m.save_run(settings.data_dir / 'runs', booster, record)}")
+    return 0
+
+
 def _f(v: float | None) -> str:
     return f"{v:6.2f}" if v is not None else "     -"
 
@@ -303,6 +363,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("build-tables", help="parse the raw archive into Parquet tables").set_defaults(
         fn=cmd_build_tables
     )
+
+    p = sub.add_parser("archive-pull", help="save archive months for the 40 stations locally")
+    p.add_argument("months", nargs="+", help="YYYY-MM")
+    p.set_defaults(fn=cmd_archive_pull)
+
+    p = sub.add_parser("train", help="train the median model on the archive, score on collected")
+    p.add_argument("--months", nargs="+", default=["2026-07", "2026-08", "2026-09", "2026-10"])
+    p.add_argument("--valid-from", default="2026-10-18", help="first day of validation")
+    p.set_defaults(fn=cmd_train)
 
     p = sub.add_parser("baselines", help="actual times, snapshots and baseline errors")
     p.add_argument("--by-hour", action="store_true", help="also break errors down by hour")

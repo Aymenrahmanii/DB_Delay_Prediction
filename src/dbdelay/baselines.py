@@ -142,9 +142,10 @@ def _snapshots(con: duckdb.DuckDBPyConnection, horizons: tuple[int, ...], basis:
              and s.dep_planned is not null and s.dep_planned < g.arr_planned
              and s.stop_id <> g.stop_id;
 
-        create or replace temp table pers as
-        with v as (
-            select r.stop_id, r.horizon, r.prev_planned,
+        -- Stops the train had already left by t (as DB said at t); features use them too.
+        create or replace temp table departed as
+        select * exclude (prev_covered) from (
+            select r.stop_id, r.horizon, r.prev_id, r.prev_eva, r.prev_planned,
                    case when e.stop_id is null then r.prev_planned
                         else coalesce(e.dep_changed, r.prev_planned) end as prev_dep,
                    p.polled_at is not null and p.polled_at >= r.t - {cov} as prev_covered, r.t
@@ -152,11 +153,13 @@ def _snapshots(con: duckdb.DuckDBPyConnection, horizons: tuple[int, ...], basis:
             asof left join ev e on e.stop_id = r.prev_id and e.seen <= r.t
             asof left join polls p on p.eva = r.prev_eva and p.polled_at <= r.t
         )
+        where prev_covered and prev_dep <= t;
+
+        create or replace temp table pers as
         select stop_id, horizon,
                arg_max(date_diff('second', prev_planned, prev_dep) / 60.0, prev_planned)
                    as pers_delay
-        from v
-        where prev_covered and prev_dep <= t  -- the train had left that stop by t
+        from departed
         group by stop_id, horizon;
 
         create or replace temp table snapshots as
