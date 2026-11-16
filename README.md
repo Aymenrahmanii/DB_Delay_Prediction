@@ -3,7 +3,7 @@
 Predict how late a Deutsche Bahn long-distance train (ICE, IC, EC) will be at its next stops,
 15–90 minutes ahead, and score it against DB's own forecast published at the same moment.
 
-> Status: **week 4: first model.** Results table goes here in week 8.
+> Status: **week 5: ranges and the "with DB" model.** Results table goes here in week 8.
 
 ## Week 1: the collector
 
@@ -169,6 +169,43 @@ Mean absolute error, minutes, same rows as the baselines (12–16 November):
 The model beats persistence at every horizon but not DB, which knows far more than delays at
 40 stations. 59 % of the model's gain comes from the current delay, then the stations and the
 train's own history.
+
+## Week 5: ranges and the "with DB" model
+
+```bash
+uv run dbdelay archive-pull 2026-07 2026-08 2026-09 2026-10   # stops + change snapshots
+uv run dbdelay train --by-hour --by-station                  # both models, ~10 min
+```
+
+Each model is three LightGBM quantile models (10 / 50 / 90 %). The median is the forecast and
+10–90 % the 80 % range, calibrated on the validation weeks with conformalized quantile
+regression (it was widened by about 0.2 min).
+
+- **without DB**: the week-4 features, training moments every 15 min.
+- **with DB**: the same plus DB's forecast for the target at t. The archive's change table
+  holds DB's change feed per station a few times a day; each snapshot is a moment where DB's
+  forecast is known (112,606 training rows). Its `snapshot_timestamp` is **UTC**, unlike the
+  other archive times: snapshot forecasts stop changing exactly 2 h "before" the arrival in
+  summer time, so it is converted to Berlin time on pull.
+- Archive arrival times last seen in a snapshot before the train arrived are old forecasts,
+  not arrivals (3.5 % of October); they are not used as labels.
+
+Collected days, 12–16 November, same rows as the baselines (MAE in minutes):
+
+| Horizon | Persistence | DB's forecast | Without DB | With DB | With DB vs DB (95 % CI) | 80 % range covers |
+|---|---:|---:|---:|---:|---:|---:|
+| 15 min | 4.91 | **2.10** | 3.62 | 2.23 | −6.1 % (−7.6, −4.6) | 79.9 % |
+| 30 min | 5.69 | **3.11** | 4.77 | 3.13 | −0.6 % (−2.0, +0.8) | 79.8 % |
+| 60 min | 7.67 | 5.13 | 6.67 | **4.80** | +6.4 % (+4.7, +8.1) | 81.5 % |
+| 90 min | 9.37 | 7.13 | 8.36 | **6.25** | +12.3 % (+10.4, +14.1) | 81.1 % |
+
+The confidence intervals come from resampling trips. DB's forecast is hard to beat 15 minutes
+ahead; 60 and 90 minutes ahead, the model that sees DB's forecast is closer, mainly by
+correcting DB's optimism. The gain comes on the weekdays with more delay (90 min: +15 to
++19 % on Thursday, Friday and Monday) and is close to zero on the quieter weekend. DB's
+forecast carries 80 % of that model's gain. The ranges cover 80–82 % at every horizon
+(target 78–82 %); the without-DB ranges cover 77.5–82.5 %. Five days is a short test: the
+final numbers come from the held-out weeks in week 8.
 
 ### The archive
 

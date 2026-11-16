@@ -229,62 +229,87 @@ def cmd_check(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def cmd_archive_pull(settings: Settings, args: argparse.Namespace) -> int:
-    from dbdelay.archive import pull_month
+    from dbdelay.archive import pull_changes, pull_month
 
     evas = [s.eva for s in load_stations(settings.stations_file)]
     for month in args.months:
-        started = time.monotonic()
-        out, n = pull_month(month, evas, settings.data_dir / "archive")
-        print(f"{month}: {n} stops -> {out} ({time.monotonic() - started:.0f} s)")
+        for kind, pull in (("stops", pull_month), ("change snapshots", pull_changes)):
+            started = time.monotonic()
+            out, n = pull(month, evas, settings.data_dir / "archive")
+            print(f"{month}: {n} {kind} -> {out} ({time.monotonic() - started:.0f} s)")
     return 0
 
 
 def cmd_train(settings: Settings, args: argparse.Namespace) -> int:
     from dbdelay import baselines as bl
     from dbdelay import model as m
-    from dbdelay.features import FEATURES
 
     archive_dir = settings.data_dir / "archive"
     train_files = [archive_dir / f"stops-{mo}.parquet" for mo in args.months]
+    change_files = [archive_dir / f"changes-{mo}.parquet" for mo in args.months]
     history = sorted(archive_dir.glob("stops-*.parquet"))
-    missing = [f for f in train_files if not f.exists()]
+    missing = [f for f in [*train_files, *change_files] if not f.exists()]
     if missing:
         sys.exit(f"missing {', '.join(map(str, missing))}; run dbdelay archive-pull first")
     stations = load_stations(settings.stations_file)
     valid_from = date.fromisoformat(args.valid_from)
 
-    started = time.monotonic()
-    booster, info = m.train(duckdb.connect(), stations, train_files, history, valid_from)
-    print(
-        f"trained on {info['rows_train']} rows, validated on {info['rows_valid']} "
-        f"(from {valid_from}): MAE {info['valid_mae']:.2f} min at iteration "
-        f"{info['best_iteration']} ({time.monotonic() - started:.0f} s)"
-    )
-    paths = bl.Paths(_tables_dir(settings), settings.poll_log_dir)
-    test = m.score_on_collector(duckdb.connect(), booster, stations, paths, history)
+    trainers = {"without_db": m.train_without_db, "with_db": m.train_with_db}
+    models = []
+    for name in args.models:
+        started = time.monotonic()
+        model = trainers[name](stations, train_files, change_files, history, valid_from)
+        i = model.info
+        print(
+            f"{name}: {i['rows_train']} training rows, {i['rows_valid']} validation rows "
+            f"(from {valid_from}); validation MAE {i['valid_mae']:.2f} min, raw 10-90 % "
+            f"coverage {i['valid_raw_coverage']:.1%}, range widened by {i['widen_min']:+.2f} "
+            f"min ({time.monotonic() - started:.0f} s)"
+        )
+        models.append(model)
 
-    print("\ncollected days, mean absolute error of the arrival delay, minutes (same rows)")
-    print("horizon       n  persistence      DB   model   model vs DB")
+    paths = bl.Paths(_tables_dir(settings), settings.poll_log_dir)
+    con = m.collector_predictions(models, stations, paths, history)
+    test = m.scores(con)
+    print("\ncollected days (same rows): MAE of the arrival delay in minutes, 80 % range")
+    print("horizon  model          n  persist.     DB  model  vs DB  coverage  width")
     for r in test:
         gain = 1 - r["mae_model"] / r["mae_db"]
         print(
-            f"{r['horizon']:>4} min {r['n']:>7}       {_f(r['mae_persistence'])}  "
-            f"{_f(r['mae_db'])}  {_f(r['mae_model'])}   {gain:+.1%}"
+            f"{r['horizon']:>4} min  {r['model']:<11} {r['n']:>6}  {_f(r['mae_persistence'])} "
+            f"{_f(r['mae_db'])} {_f(r['mae_model'])} {gain:+6.1%}    {r['coverage']:6.1%} "
+            f"{_f(r['width'])}"
         )
+    if args.by_hour or args.by_station:
+        for by, label in (("hour", args.by_hour), ("station_name", args.by_station)):
+            if not label:
+                continue
+            print(f"\nby {by}, all horizons: MAE (DB / model)")
+            for r in m.scores(con, by=by):
+                print(
+                    f"  {r[by]!s:<30} {r['model']:<11} {r['n']:>6}  "
+                    f"{_f(r['mae_db'])} {_f(r['mae_model'])}  coverage {r['coverage']:.0%}"
+                )
+    for model in models:
+        top = ", ".join(f"{n} {g:.0%}" for n, g in m.importance(model)[:6])
+        print(f"\n{model.name}, share of the median model's gain: {top}")
+
     record = m.RunRecord(
         run_id=m.new_run_id(),
         train_files=[f.name for f in train_files],
         valid_from=valid_from.isoformat(),
-        rows_train=info["rows_train"],
-        rows_valid=info["rows_valid"],
-        rows_test=sum(r["n"] for r in test),
-        features=list(FEATURES),
         params=m.PARAMS,
-        best_iteration=info["best_iteration"],
-        valid_mae=info["valid_mae"],
+        models={
+            x.name: {
+                **x.info,
+                "features": list(x.features),
+                "importance": m.importance(x),
+            }
+            for x in models
+        },
         test=test,
     )
-    print(f"\nrun recorded in {m.save_run(settings.data_dir / 'runs', booster, record)}")
+    print(f"\nrun recorded in {m.save_run(settings.data_dir / 'runs', models, record)}")
     return 0
 
 
@@ -371,6 +396,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = sub.add_parser("train", help="train the median model on the archive, score on collected")
     p.add_argument("--months", nargs="+", default=["2026-07", "2026-08", "2026-09", "2026-10"])
     p.add_argument("--valid-from", default="2026-10-18", help="first day of validation")
+    p.add_argument(
+        "--models", nargs="+", choices=["without_db", "with_db"], default=["without_db", "with_db"]
+    )
+    p.add_argument("--by-hour", action="store_true")
+    p.add_argument("--by-station", action="store_true")
     p.set_defaults(fn=cmd_train)
 
     p = sub.add_parser("baselines", help="actual times, snapshots and baseline errors")

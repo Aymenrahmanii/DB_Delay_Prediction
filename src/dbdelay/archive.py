@@ -88,3 +88,35 @@ def pull_month(month: str, evas: list[str], out_dir: Path) -> tuple[Path, int]:
     )
     row = con.execute(f"select count(*) from {stops.literal(out.as_posix())}").fetchone()
     return out, int(row[0]) if row else 0
+
+
+CHANGES_URL = (
+    "hf://datasets/piebro/deutsche-bahn-data/monthly_processed_data_change/data-{month}.parquet"
+)
+
+
+def pull_changes(month: str, evas: list[str], out_dir: Path) -> tuple[Path, int]:
+    """Save one month of the archive's change snapshots at the given stations.
+
+    Each snapshot is DB's change feed for one station at one moment, so it holds DB's
+    forecast as of then. ``snapshot_timestamp`` is UTC (naive): checked against the final
+    times, the snapshot forecasts stop changing exactly 2 h "before" arrival in summer time.
+    It is stored as Berlin local time (``snap_at``), like every other time here.
+    """
+    src = CHANGES_URL.format(month=month)
+    con = connect(src)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"changes-{month}.parquet"
+    in_list = ", ".join(stops.literal(e) for e in evas)
+    con.execute(
+        f"""copy (
+            select id as stop_id, eva,
+                   timezone('Europe/Berlin', timezone('UTC', snapshot_timestamp)) as snap_at,
+                   arrival_change_time as arr_changed, arrival_change_status as arr_status
+            from (select * replace (cast(try_cast(eva as bigint) as varchar) as eva)
+                  from read_parquet({stops.literal(src)}))
+            where eva in ({in_list})
+        ) to {stops.literal(out.as_posix())} (format parquet)"""
+    )
+    row = con.execute(f"select count(*) from {stops.literal(out.as_posix())}").fetchone()
+    return out, int(row[0]) if row else 0

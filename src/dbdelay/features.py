@@ -44,6 +44,13 @@ FEATURES = (
     "hist_p90",
     "hist_n",
 )
+# The "with DB" model also sees DB's own forecast for the target stop at t.
+FEATURES_DB = (
+    *FEATURES,
+    "db_delay",  # DB's forecast delay at the target, minutes
+    "db_eta",  # minutes from t to DB's forecast arrival
+    "db_minus_cur",  # how much DB expects the delay to change from now
+)
 CATEGORICAL = ("eva_code", "prev_eva_code", "type_code", "dow")
 HISTORY_DAYS = 28
 GRID_MIN = 15  # training moments every 15 minutes
@@ -55,8 +62,51 @@ def _list(values: list[str] | tuple[str, ...]) -> str:
     return "[" + ", ".join(literal(v) for v in values) + "]"
 
 
+def _files(files: list[Path]) -> str:
+    return "[" + ", ".join(literal(f.as_posix()) for f in files) + "]"
+
+
+def _archive_stops(con: duckdb.DuckDBPyConnection, files: list[Path], changes: list[Path]) -> None:
+    """Temp table ``a``: clean archive stops. ``label_ok`` is false where the archive's final
+    arrival time was last seen in a snapshot taken before the train arrived: it is then an
+    old forecast, not the arrival (3.5 % of October)."""
+    last_seen = (
+        f"""select stop_id, max(snap_at) as last_seen from read_parquet({_files(changes)})
+            group by stop_id"""
+        if changes
+        else "select null::varchar as stop_id, null::timestamp as last_seen where false"
+    )
+    con.execute(
+        f"""
+        create or replace temp table a as
+        select s.*, l.last_seen is null or l.last_seen >= s.arr_changed as label_ok
+        from read_parquet({_files(files)}) s
+        left join ({last_seen}) l using (stop_id)
+        where not canceled and not is_diversion and not midnight_placeholder
+          and coalesce(abs(arr_delay_min), 0) <= 720 and coalesce(abs(dep_delay_min), 0) <= 720;
+        """
+    )
+
+
+def _departed_from_archive(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute(
+        """
+        create or replace temp table fdeparted as
+        select g.stop_id, g.horizon, k.eva as prev_eva, k.dep_planned as prev_planned,
+               k.dep_changed as prev_dep
+        from ftarget g
+        join a k on k.trip_key = g.trip_key and k.stop_id <> g.stop_id
+             and k.dep_planned < g.arr_planned
+             and k.dep_changed is not null and k.dep_changed <= g.t;
+        """
+    )
+
+
 def archive_inputs(
-    con: duckdb.DuckDBPyConnection, files: list[Path], grid_min: int = GRID_MIN
+    con: duckdb.DuckDBPyConnection,
+    files: list[Path],
+    changes: list[Path] | None = None,
+    grid_min: int = GRID_MIN,
 ) -> None:
     """``ftarget`` and ``fdeparted`` from local archive months (``dbdelay archive-pull``).
 
@@ -67,15 +117,10 @@ def archive_inputs(
     that instead of the trains. "Not arrived yet" is the only outcome it uses, and that is
     known at t. ``horizon`` is then just the row key: minutes from t to the actual arrival.
     """
-    src = "[" + ", ".join(literal(f.as_posix()) for f in files) + "]"
+    _archive_stops(con, files, changes or [])
     step = f"interval {grid_min} minute"
     con.execute(
         f"""
-        create or replace temp table a as
-        select * from read_parquet({src})
-        where not canceled and not is_diversion and not midnight_placeholder
-          and coalesce(abs(arr_delay_min), 0) <= 720 and coalesce(abs(dep_delay_min), 0) <= 720;
-
         create or replace temp table ftarget as
         select stop_id, trip_key, eva, train_type, train_number, arr_planned, actual_delay,
                cast(date_diff('second', t, arr_changed) / 60 as integer) as horizon, t
@@ -88,18 +133,51 @@ def archive_inputs(
                              arr_planned + interval {LOOKAHEAD_MIN} minute),
                        {step})) as t
             from a
-            where arr_planned is not null and arr_changed is not null
+            where arr_planned is not null and arr_changed is not null and label_ok
         );
-
-        create or replace temp table fdeparted as
-        select g.stop_id, g.horizon, k.eva as prev_eva, k.dep_planned as prev_planned,
-               k.dep_changed as prev_dep
-        from ftarget g
-        join a k on k.trip_key = g.trip_key and k.stop_id <> g.stop_id
-             and k.dep_planned < g.arr_planned
-             and k.dep_changed is not null and k.dep_changed <= g.t;
         """
     )
+    _departed_from_archive(con)
+
+
+def archive_db_inputs(
+    con: duckdb.DuckDBPyConnection, files: list[Path], changes: list[Path]
+) -> None:
+    """``ftarget``, ``fdeparted`` and ``fdb`` at the archive's snapshot moments.
+
+    The archive holds DB's change feed per station a few times a day. Each snapshot of the
+    target's station is a moment t at which DB's forecast is known: the changed arrival in
+    the snapshot, or the planned time if the stop is not in it (no change published). The
+    moments come from the scraper's schedule, not from the outcome; as on the grid, a target
+    counts from ``LOOKBACK_MIN`` before its planned arrival until it arrived.
+    """
+    _archive_stops(con, files, changes)
+    ch = _files(changes)
+    con.execute(
+        f"""
+        create or replace temp table moments as
+        select eva, min(snap_at) as t from read_parquet({ch})
+        group by eva, time_bucket(interval 1 minute, snap_at);
+
+        create or replace temp table ftarget as
+        select s.stop_id, s.trip_key, s.eva, s.train_type, s.train_number, s.arr_planned,
+               s.arr_delay_min as actual_delay,
+               cast(date_diff('second', m.t, s.arr_changed) / 60 as integer) as horizon, m.t
+        from a s join moments m on m.eva = s.eva
+             and m.t >= s.arr_planned - interval {LOOKBACK_MIN} minute
+             and m.t < s.arr_changed
+        where s.arr_planned is not null and s.arr_changed is not null and s.label_ok;
+
+        create or replace temp table fdb as
+        select g.stop_id, g.horizon,
+               case when c.stop_id is null then g.arr_planned
+                    else coalesce(c.arr_changed, g.arr_planned) end as db_arr,
+               coalesce(c.arr_status = 'c', false) as db_cancelled
+        from ftarget g
+        left join read_parquet({ch}) c on c.stop_id = g.stop_id and c.snap_at = g.t;
+        """
+    )
+    _departed_from_archive(con)
 
 
 def collector_inputs(con: duckdb.DuckDBPyConnection) -> None:
@@ -114,17 +192,36 @@ def collector_inputs(con: duckdb.DuckDBPyConnection) -> None:
 
         create or replace temp table fdeparted as
         select stop_id, horizon, prev_eva, prev_planned, prev_dep from departed;
+
+        create or replace temp table fdb as
+        select stop_id, horizon,
+               arr_planned + to_seconds(cast(round(db_delay * 60) as bigint)) as db_arr,
+               false as db_cancelled
+        from snapshots;
         """
     )
 
 
 def build_features(
-    con: duckdb.DuckDBPyConnection, stations: list[Station], history: list[Path]
+    con: duckdb.DuckDBPyConnection,
+    stations: list[Station],
+    history: list[Path],
+    with_db: bool = False,
 ) -> None:
-    """Creates the temp table ``features``: ids, ``actual_delay`` and ``FEATURES``."""
+    """Creates the temp table ``features``: ids, ``actual_delay`` and ``FEATURES``, or
+    ``FEATURES_DB`` with ``with_db`` (which needs the table ``fdb``)."""
+    db_cols, db_join, db_where = "", "", ""
+    if with_db:
+        db_cols = """,
+               date_diff('second', g.arr_planned, d.db_arr) / 60.0 as db_delay,
+               date_diff('second', g.t, d.db_arr) / 60.0 as db_eta,
+               date_diff('second', g.arr_planned, d.db_arr) / 60.0 - c.cur_delay
+                   as db_minus_cur"""
+        db_join = "join fdb d using (stop_id, horizon)"
+        db_where = "where not d.db_cancelled"
     evas = _list([s.eva for s in stations])
     types = _list(LONG_DISTANCE)
-    hist_src = "[" + ", ".join(literal(f.as_posix()) for f in history) + "]"
+    hist_src = _files(history)
     con.execute(
         f"""
         create or replace temp table cur as
@@ -176,10 +273,12 @@ def build_features(
                list_position({evas}, g.eva) as eva_code,
                list_position({evas}, c.prev_eva) as prev_eva_code,
                list_position({types}, g.train_type) as type_code,
-               h.hist_median, h.hist_p90, coalesce(h.hist_n, 0) as hist_n
+               h.hist_median, h.hist_p90, coalesce(h.hist_n, 0) as hist_n{db_cols}
         from ftarget g
         join cur c using (stop_id, horizon)
+        {db_join}
         left join hist h on h.train_number = g.train_number and h.eva = g.eva
-             and h.day = cast(g.arr_planned as date);
+             and h.day = cast(g.arr_planned as date)
+        {db_where};
         """
     )
