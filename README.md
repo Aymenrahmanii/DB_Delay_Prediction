@@ -3,7 +3,7 @@
 Predict how late a Deutsche Bahn long-distance train (ICE, IC, EC) will be at its next stops,
 15–90 minutes ahead, and score it against DB's own forecast published at the same moment.
 
-> Status: **week 5: ranges and the "with DB" model.** Results table goes here in week 8.
+> Status: **week 6: live predictions.** Results table goes here in week 8.
 
 ## Week 1: the collector
 
@@ -206,6 +206,30 @@ correcting DB's optimism. The gain comes on the weekdays with more delay (90 min
 forecast carries 80 % of that model's gain. The ranges cover 80–82 % at every horizon
 (target 78–82 %); the without-DB ranges cover 77.5–82.5 %. Five days is a short test: the
 final numbers come from the held-out weeks in week 8.
+
+## Week 6: live predictions
+
+```bash
+uv sync --group web --group analysis
+uv run dbdelay collect --hours 4 --keep-awake     # in one terminal
+uv run dbdelay serve                              # in another: http://127.0.0.1:8000
+uv run dbdelay serve --replay-at 2026-11-15T15:00+01:00   # replay collected days instead
+```
+
+Every 30 s the server reads only what the collector appended to the raw files since the last
+pass, updates DB's view of each long-distance stop, and predicts every coming collected stop
+of the trains that have already left a collected station. The feature rows are built by the
+same code as in training (`build_features`), from what is known at that moment. Both models
+run; the page shows the "with DB" one.
+
+- `/`: the trains running now, with the current delay and both forecasts for the next stop.
+- `/train/<trip>`: every collected stop with planned time, DB's forecast, the model's forecast
+  and its 80 % range, a chart of the delay by station, and a chart of how both forecasts for
+  the next stop changed over time. The page redraws every 30 s.
+- Search by train number ("ICE 597" or "597"); `/api/train/<trip>` and `/api/status` give
+  the same as JSON, including the freshness (newest DB data to forecasts ready).
+- Every forecast is appended to `data/predictions/<day>.jsonl` for nightly scoring (week 7).
+  A replay reads only data fetched before its clock and logs to `data/predictions-replay/`.
 
 ### The archive
 

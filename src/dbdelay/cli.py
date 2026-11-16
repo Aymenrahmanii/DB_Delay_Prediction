@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -313,6 +313,22 @@ def cmd_train(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+
+        from dbdelay.web.app import build_live, create_app
+    except ImportError:
+        sys.exit("Install the web and analysis groups: uv sync --group web --group analysis")
+    replay = datetime.fromisoformat(args.replay_at).astimezone(UTC) if args.replay_at else None
+    live = build_live(settings, args.run, replay)
+    if replay:
+        print(f"replaying collected data from {replay:%Y-%m-%d %H:%M} UTC")
+    print(f"serving forecasts of run {live.run_id} on http://{args.host}:{args.port}")
+    uvicorn.run(create_app(live), host=args.host, port=args.port)
+    return 0
+
+
 def _f(v: float | None) -> str:
     return f"{v:6.2f}" if v is not None else "     -"
 
@@ -402,6 +418,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--by-hour", action="store_true")
     p.add_argument("--by-station", action="store_true")
     p.set_defaults(fn=cmd_train)
+
+    p = sub.add_parser("serve", help="live site: forecasts per train, refreshed every 30 s")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--run", help="run id of the models (default: the latest)")
+    p.add_argument(
+        "--replay-at",
+        help="replay collected data from this moment, e.g. 2026-11-15T15:00+01:00",
+    )
+    p.set_defaults(fn=cmd_serve)
 
     p = sub.add_parser("baselines", help="actual times, snapshots and baseline errors")
     p.add_argument("--by-hour", action="store_true", help="also break errors down by hour")

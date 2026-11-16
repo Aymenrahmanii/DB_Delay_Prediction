@@ -221,7 +221,15 @@ def build_features(
         db_where = "where not d.db_cancelled"
     evas = _list([s.eva for s in stations])
     types = _list(LONG_DISTANCE)
-    hist_src = _files(history)
+    past_sql = (
+        f"""select train_number, eva, cast(arr_planned as date) as day, arr_delay_min as d
+            from read_parquet({_files(history)})
+            where arr_delay_min is not null and not canceled and not midnight_placeholder
+              and abs(arr_delay_min) <= 720"""
+        if history
+        else """select null::varchar as train_number, null::varchar as eva,
+                       null::date as day, null::double as d where false"""
+    )
     con.execute(
         f"""
         create or replace temp table cur as
@@ -245,12 +253,7 @@ def build_features(
         with keys as (
             select distinct train_number, eva, cast(arr_planned as date) as day from ftarget
         ),
-        past as (
-            select train_number, eva, cast(arr_planned as date) as day, arr_delay_min as d
-            from read_parquet({hist_src})
-            where arr_delay_min is not null and not canceled and not midnight_placeholder
-              and abs(arr_delay_min) <= 720
-        )
+        past as ({past_sql})
         select k.train_number, k.eva, k.day,
                median(p.d) as hist_median, quantile_cont(p.d, 0.9) as hist_p90,
                count(p.d) as hist_n

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block body %}
+<h2 style="font-size:18px">“{{ q }}”</h2>
+{% if trains %}
+<table>
+  <tr><th>Train</th><th>First collected stop</th><th>Last collected stop</th></tr>
+  {% for t in trains %}
+  <tr>
+    <td><a href="/train/{{ t.trip_key }}">{{ t.train }}</a></td>
+    <td>{{ t.stops[0].station }} {{ t.stops[0].dep_planned or t.stops[0].arr_planned }}</td>
+    <td>{{ t.stops[-1].station }} {{ t.stops[-1].arr_planned or t.stops[-1].dep_planned }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>No train “{{ q }}” in the last hours at the collected stations. Try the number alone, e.g. 597.</p>
+{% endif %}
+{% endblock %}

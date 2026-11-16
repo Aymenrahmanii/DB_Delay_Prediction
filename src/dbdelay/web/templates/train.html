@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}{{ t.train }} · DB delay forecasts{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css">
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
+{% endblock %}
+{% block body %}
+<h2 style="font-size:20px;margin:4px 0">{{ t.train }}</h2>
+<p class="muted" id="meta">updated {{ t.updated }} · model run {{ t.run_id }}</p>
+
+<div class="legend">
+  <span><span class="swatch" style="background:var(--db)"></span>DB's forecast</span>
+  <span><span class="swatch" style="background:var(--model)"></span>model, 80 % range</span>
+</div>
+<div class="muted">Delay by station (minutes)</div>
+<div id="byStop" class="chart"></div>
+
+<div class="muted" id="trackTitle">Forecasts for the next stop over time (minutes late)</div>
+<div id="track" class="chart"></div>
+
+<div class="scroll">
+<table id="stops">
+  <thead><tr><th>Station</th><th class="num">Planned</th><th class="num db">DB</th>
+      <th class="num model">Model</th><th class="num">80 % range</th><th>Status</th></tr></thead>
+  <tbody></tbody>
+</table>
+</div>
+
+<script>
+const tripKey = {{ t.trip_key | tojson }};
+let data = {{ t | tojson }};
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = (v) => v === null || v === undefined ? "" : (v >= 0 ? "+" : "") + Math.round(v);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+let charts = [];
+
+function table() {
+  const rows = data.stops.map((s) => `
+    <tr class="${s.status}">
+      <td>${esc(s.station)}</td>
+      <td class="num">${s.arr_planned || s.dep_planned}</td>
+      <td class="num db">${s.db_time} ${fmt(s.db_delay)}</td>
+      <td class="num model">${s.pred_time} ${fmt(s.pred)}</td>
+      <td class="num">${s.lo === null ? "" : fmt(s.lo) + " to " + fmt(s.hi)}</td>
+      <td>${s.status === "passed" ? "passed" : s.status === "cancelled" ? "cancelled" : s.status === "forecast" ? "" : "no forecast"}</td>
+    </tr>`).join("");
+  document.querySelector("#stops tbody").innerHTML = rows;
+  document.getElementById("meta").textContent = `updated ${data.updated} · model run ${data.run_id}`;
+  document.getElementById("trackTitle").textContent = data.next
+    ? `Forecasts for ${data.next.station} over time (minutes late)` : "No coming stop with a forecast";
+}
+
+function draw() {
+  charts.forEach((c) => c.destroy());
+  charts = [];
+  const width = document.getElementById("byStop").clientWidth;
+  const s = data.stops;
+  const x = s.map((_, i) => i);
+  const axis = { stroke: css("--muted"), grid: { stroke: css("--line") }, ticks: { stroke: css("--line") } };
+  charts.push(new uPlot({
+    width, height: 240,
+    scales: { x: { time: false } },
+    axes: [{ ...axis, values: (u, v) => v.map((i) => s[i] ? s[i].station.split(/[ (]/)[0] : "") }, axis],
+    series: [{}, { label: "DB", stroke: css("--db"), width: 2 },
+             { label: "model", stroke: css("--model"), width: 2 },
+             { label: "low", stroke: "transparent" }, { label: "high", stroke: "transparent" }],
+    bands: [{ series: [4, 3], fill: css("--band") }],
+    legend: { show: false },
+  }, [x, s.map((r) => r.db_delay), s.map((r) => r.pred), s.map((r) => r.lo), s.map((r) => r.hi)],
+     document.getElementById("byStop")));
+
+  const tr = data.track;
+  if (tr.length) {
+    const tx = tr.map((p) => Date.parse(p.t) / 1000);
+    charts.push(new uPlot({
+      width, height: 220,
+      axes: [axis, axis],
+      series: [{}, { label: "DB", stroke: css("--db"), width: 2 },
+               { label: "model", stroke: css("--model"), width: 2 },
+               { label: "low", stroke: "transparent" }, { label: "high", stroke: "transparent" }],
+      bands: [{ series: [4, 3], fill: css("--band") }],
+      legend: { show: false },
+    }, [tx, tr.map((p) => p.db), tr.map((p) => p.pred), tr.map((p) => p.lo), tr.map((p) => p.hi)],
+       document.getElementById("track")));
+  } else {
+    document.getElementById("track").innerHTML = "";
+  }
+}
+
+async function poll() {
+  try {
+    const r = await fetch(`/api/train/${encodeURIComponent(tripKey)}`);
+    if (r.ok) { data = await r.json(); table(); draw(); }
+  } catch (e) { /* keep the last view */ }
+}
+table(); draw();
+setInterval(poll, 30000);
+window.addEventListener("resize", draw);
+</script>
+{% endblock %}

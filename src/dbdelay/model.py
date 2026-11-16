@@ -77,7 +77,7 @@ class QuantileModel:
         return raw[:, 1], raw[:, 0] - self.widen, raw[:, 2] + self.widen
 
 
-def _matrix(
+def feature_matrix(
     con: duckdb.DuckDBPyConnection, features: tuple[str, ...], where: str
 ) -> tuple[Any, Any, Any]:
     import polars as pl
@@ -100,8 +100,8 @@ def fit(
     import numpy as np
 
     v = f"date '{valid_from.isoformat()}'"
-    x_tr, y_tr, _ = _matrix(con, features, f"t < {v}")
-    x_va, y_va, _ = _matrix(con, features, f"t >= {v}")
+    x_tr, y_tr, _ = feature_matrix(con, features, f"t < {v}")
+    x_va, y_va, _ = feature_matrix(con, features, f"t >= {v}")
     cats = [features.index(c) for c in CATEGORICAL]
     boosters: dict[float, Any] = {}
     for q in QUANTILES:
@@ -173,7 +173,7 @@ def collector_predictions(
     build_features(con, stations, history_files, with_db=True)
     frames = []
     for m in models:
-        x, _, ids = _matrix(con, m.features, "true")
+        x, _, ids = feature_matrix(con, m.features, "true")
         med, lo, hi = m.predict(x)
         frames.append(
             ids.with_columns(
@@ -242,3 +242,28 @@ def save_run(runs_dir: Path, models: list[QuantileModel], record: RunRecord) -> 
 
 def new_run_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def load_run(runs_dir: Path, run_id: str | None = None) -> tuple[str, list[QuantileModel]]:
+    """The models of a recorded run (the latest one by default)."""
+    import lightgbm as lgb
+
+    if run_id is None:
+        runs = sorted(p.stem for p in runs_dir.glob("*.json"))
+        if not runs:
+            raise FileNotFoundError(f"no recorded run in {runs_dir}; run dbdelay train")
+        run_id = runs[-1]
+    record = json.loads((runs_dir / f"{run_id}.json").read_text(encoding="utf-8"))
+    models: list[QuantileModel] = []
+    for name, info in record.get("models", {}).items():
+        boosters: dict[float, Any] = {}
+        for q in QUANTILES:
+            b = lgb.Booster(model_file=str(runs_dir / f"{run_id}.{name}.q{int(q * 100)}.lgb.txt"))
+            b.best_iteration = 0  # the saved file holds only the best iterations: use all
+            boosters[q] = b
+        models.append(
+            QuantileModel(name, tuple(info["features"]), boosters, float(info["widen_min"]), info)
+        )
+    if not models:
+        raise ValueError(f"run {run_id} has no quantile models (recorded before week 5)")
+    return run_id, models

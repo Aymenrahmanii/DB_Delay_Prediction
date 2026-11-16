@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}DB delay forecasts{% endblock %}</title>
+<style>
+  :root { --bg: #fafaf8; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+          --db: #c0392b; --model: #1f5fa8; --band: rgba(31, 95, 168, .15); --ok: #2e7d32;
+          --on-accent: #ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ececea; --muted: #9a9a94; --line: #2c2c2a;
+            --db: #ef7a6c; --model: #7fb1ef; --band: rgba(127, 177, 239, .18); --ok: #81c784;
+            --on-accent: #161615; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline;
+           justify-content: space-between; margin-bottom: 12px; }
+  h1 { font-size: 22px; margin: 0; }
+  a { color: var(--model); text-decoration: none; }
+  form { display: flex; gap: 6px; }
+  input { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+          background: transparent; color: var(--fg); width: 11em; }
+  button { font: inherit; padding: 6px 12px; border: 0; border-radius: 6px;
+           background: var(--model); color: var(--on-accent); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  td.num, th.num { text-align: right; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .db { color: var(--db); } .model { color: var(--model); }
+  .passed td { color: var(--muted); }
+  .cancelled td { text-decoration: line-through; color: var(--muted); }
+  .scroll { overflow-x: auto; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin: 8px 0; }
+  .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle;
+            margin-right: 4px; }
+  .chart { width: 100%; min-height: 240px; margin: 8px 0 20px; }
+  footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
+</style>
+{% block head %}{% endblock %}
+</head>
+<body>
+<main>
+  <header>
+    <h1><a href="/" style="color:inherit">DB delay forecasts</a></h1>
+    <form action="/search"><input name="q" placeholder="ICE 597" aria-label="Train number">
+      <button>Find</button></form>
+  </header>
+  {% block body %}{% endblock %}
+  <footer>Forecasts for ICE, IC and EC trains at 40 stations, from DB Timetables data
+    (Deutsche Bahn, CC BY 4.0). Red: DB's own forecast; blue: this model, with its 80 % range.
+  </footer>
+</main>
+</body>
+</html>

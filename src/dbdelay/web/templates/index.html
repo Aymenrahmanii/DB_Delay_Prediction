@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block body %}
+<p class="muted">
+  {{ trains | length }} trains running now · updated {{ status.updated or "never" }}
+</p>
+{% if trains %}
+<div class="scroll">
+<table>
+  <tr><th>Train</th><th>Route</th><th>Next stop</th><th class="num">Planned</th>
+      <th class="num">Late now</th><th class="num db">DB</th><th class="num model">Model</th></tr>
+  {% for t in trains %}
+  <tr>
+    <td><a href="/train/{{ t.trip_key }}">{{ t.train }}</a></td>
+    <td>{{ t.from }} → {{ t.to }}</td>
+    <td>{{ t.next }}</td>
+    <td class="num">{{ t.next_planned }}</td>
+    <td class="num">{{ "%+d" % (t.cur_delay | round | int) }}</td>
+    <td class="num db">{{ "%+d" % (t.db | round | int) }}</td>
+    <td class="num model">{{ "%+d" % (t.pred | round | int) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<p>No forecasts yet. Is the collector running? Forecasts appear for trains that have left one of
+the collected stations.</p>
+{% endif %}
+{% endblock %}
