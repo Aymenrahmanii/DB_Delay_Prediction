@@ -1,6 +1,6 @@
 """Baselines on one hand-made trip with known answers (Berlin = UTC+1 in November)."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -36,7 +36,7 @@ def write(data: Path, endpoint: str, eva: str, at: datetime, body: bytes) -> Non
 
 
 @pytest.fixture
-def con(tmp_path: Path) -> duckdb.DuckDBPyConnection:
+def data(tmp_path: Path) -> Path:
     write(tmp_path, "plan", FFM, berlin(11, 0), PLAN_FFM)
     write(tmp_path, "plan", MA, berlin(11, 0), PLAN_MA)
     write(tmp_path, "fchg", FFM, berlin(11, 0), change(FFM, 3, "dp", "205"))  # leaves +5
@@ -52,8 +52,13 @@ def con(tmp_path: Path) -> duckdb.DuckDBPyConnection:
             log.write(PollResult("fchg", eva, iso, iso, True, 200, 1, 100, 0.1), t)
         t += timedelta(minutes=5)
     build_tables(tmp_path / "raw", tmp_path / "tables")
+    return tmp_path
+
+
+@pytest.fixture
+def con(data: Path) -> duckdb.DuckDBPyConnection:
     c = duckdb.connect()
-    bl.build(c, bl.Paths(tmp_path / "tables", tmp_path / "polls"), load_stations())
+    bl.build(c, bl.Paths(data / "tables", data / "polls"), load_stations())
     return c
 
 
@@ -94,3 +99,54 @@ def test_no_poll_no_snapshot(tmp_path: Path, con: duckdb.DuckDBPyConnection) -> 
         f"select horizon from snapshots where stop_id = '{TRIP}-5' order by 1"
     ).fetchall()
     assert [h for (h,) in hs] == [30, 60, 90]  # no poll of Mannheim in the 10 min before 12:35
+
+
+def test_score_a_day_of_forecasts(data: Path) -> None:
+    import json
+
+    from dbdelay.score import score_day, totals
+
+    def forecast(made: str, pred: float, db: float, cur: float) -> str:
+        return json.dumps(
+            {
+                "made_at": f"2026-11-13T{made}:00",
+                "stop_id": f"{TRIP}-5",
+                "trip_key": TRIP,
+                "eva": MA,
+                "model": "with_db",
+                "pred_delay": pred,
+                "lo": pred - 4,
+                "hi": pred + 3,
+                "db_delay": db,
+                "cur_delay": cur,
+                "arr_planned": "2026-11-13T12:40",
+                "run_id": "r1",
+            }
+        )
+
+    log = data / "predictions" / "2026-11-13.jsonl"
+    log.parent.mkdir()
+    # The train arrived 12:50 (+10). Made 12:35 is 15 min before; 12:33 is a worse match.
+    lines = [
+        forecast("12:33", 2, 8, 5),
+        forecast("12:35", 9, 8, 5),
+        forecast("11:50", 4, 3, 0),
+        forecast("12:20", 7, 8, 5),  # 30 min before
+    ]
+    log.write_text("".join(line + "\n" for line in lines))
+    score = score_day(
+        bl.Paths(data / "tables", data / "polls"),
+        load_stations(),
+        log,
+        date(2026, 11, 13),
+        "replay",
+    )
+    rows = {r["horizon"]: r for r in score.rows}
+    assert score.forecasts == 4 and score.run_ids == ["r1"]
+    assert set(rows) == {15, 30, 60}
+    r15 = rows[15]
+    assert (r15["n"], r15["mae_model"], r15["mae_db"], r15["mae_persistence"]) == (1, 1, 2, 5)
+    assert r15["coverage"] == 1 and r15["precision_model"] == 1 and r15["recall_db"] == 1
+    assert rows[60]["mae_model"] == 6
+    total = {r["horizon"]: r for r in totals([score], "with_db")}
+    assert total[15]["gain_vs_db"] == pytest.approx(0.5)

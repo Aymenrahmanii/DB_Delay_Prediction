@@ -3,7 +3,7 @@
 Predict how late a Deutsche Bahn long-distance train (ICE, IC, EC) will be at its next stops,
 15–90 minutes ahead, and score it against DB's own forecast published at the same moment.
 
-> Status: **week 6: live predictions.** Results table goes here in week 8.
+> Status: **week 7: scoreboard and operations.** Results table goes here in week 8.
 
 ## Week 1: the collector
 
@@ -230,6 +230,47 @@ run; the page shows the "with DB" one.
   the same as JSON, including the freshness (newest DB data to forecasts ready).
 - Every forecast is appended to `data/predictions/<day>.jsonl` for nightly scoring (week 7).
   A replay reads only data fetched before its clock and logs to `data/predictions-replay/`.
+
+## Week 7: scoreboard and operations
+
+```bash
+uv run dbdelay score                      # score finished days of live forecasts, print totals
+uv run dbdelay replay 2026-11-15          # fast-forward live forecasts over a collected day
+uv run dbdelay score --source replay      # ... and score those
+uv run dbdelay build-tables --days 2026-11-16   # update the tables for one day (~1 min)
+```
+
+- **Scoring.** A logged forecast counts at horizon h if it was made h minutes (± 2.5) before
+  the stop's actual arrival, the definition used since week 3; per stop, model and horizon the
+  closest one counts. On those rows: the model, DB's forecast as it stood then, and
+  persistence; MAE, 80 % range coverage, and precision/recall for "more than 5 min late".
+  One JSON per day in `data/scores/<live|replay>/`.
+- **Scoreboard** at `/scoreboard` (and `/api/scoreboard`): totals by horizon, every day, and
+  the error per day 60 minutes ahead.
+- **Operations without an always-on machine.** The plan's systemd timers need a server that
+  runs at night; this one runs on demand. So `dbdelay serve` does the night jobs itself
+  whenever it is running: after 03:00 it updates the tables and scores every finished day that
+  has forecasts and no score, and it switches to a newer model run (`dbdelay train`) without a
+  restart. Retraining needs a new archive month, published monthly, so it stays a command.
+- **Replay.** `dbdelay replay` runs the live pipeline over a collected day on a simulated
+  clock: each cycle sees only data fetched by its moment, so it is an honest backfill, and it
+  checks the live code against the week-5 offline scores. Replayed forecasts are kept apart
+  from live ones (`predictions-replay`, `scores/replay`).
+- Not done: HTTPS with Caddy needs a public host; it comes with the deployment.
+
+Replayed 13 and 15 November, scored like live forecasts (the "with DB" model):
+
+| Horizon | Scored | Persistence | DB | Model | vs DB | 80 % range covers |
+|---|---:|---:|---:|---:|---:|---:|
+| 15 min | 5,574 | 4.61 | **2.00** | 2.14 | −6.6 % | 80.4 % |
+| 30 min | 5,360 | 5.39 | 3.12 | **3.10** | +0.7 % | 80.0 % |
+| 60 min | 4,740 | 7.37 | 5.34 | **4.89** | +8.4 % | 80.6 % |
+| 90 min | 4,053 | 9.09 | 7.34 | **6.36** | +13.4 % | 80.7 % |
+
+This agrees with the week-5 offline evaluation (−6.1 / −0.6 / +6.4 / +12.3 %), so the live
+code builds the same features as training. For "more than 5 minutes late", the model catches
+more late arrivals than DB (recall 0.85 vs 0.69 at 90 min on 13 November) but raises more
+false alarms (precision 0.88 vs 0.96): DB's forecast is optimistic, the model's less so.
 
 ### The archive
 

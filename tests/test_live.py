@@ -102,7 +102,8 @@ def test_no_forecast_without_recent_polls(raw: Path) -> None:
 def test_site(raw: Path, tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
 
-    from dbdelay.web.app import Live, create_app
+    from dbdelay.site import Live
+    from dbdelay.web.app import create_app
 
     live = Live(
         state=LiveState(raw, load_stations()),
@@ -132,6 +133,10 @@ def test_site(raw: Path, tmp_path: Path) -> None:
     )
     assert data["stops"][0]["status"] == "passed" and data["next"]["stop_id"] == f"{TRIP}-5"
     assert client.get("/train/nope").status_code == 404
+    board = client.get("/scoreboard")
+    assert board.status_code == 200 and "No scored days yet" in board.text
+    assert client.get("/api/scoreboard", params={"source": "replay"}).json()["days"] == []
+    assert client.get("/scoreboard", params={"source": "x"}).status_code == 404
 
 
 def test_replay_never_reads_ahead(raw: Path) -> None:

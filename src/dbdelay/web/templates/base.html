@@ -47,8 +47,11 @@
 <main>
   <header>
     <h1><a href="/" style="color:inherit">DB delay forecasts</a></h1>
-    <form action="/search"><input name="q" placeholder="ICE 597" aria-label="Train number">
-      <button>Find</button></form>
+    <nav style="display:flex;gap:16px;align-items:center">
+      <a href="/scoreboard">Scoreboard</a>
+      <form action="/search"><input name="q" placeholder="ICE 597" aria-label="Train number">
+        <button>Find</button></form>
+    </nav>
   </header>
   {% block body %}{% endblock %}
   <footer>Forecasts for ICE, IC and EC trains at 40 stations, from DB Timetables data

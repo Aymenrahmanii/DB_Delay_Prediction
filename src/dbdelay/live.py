@@ -233,6 +233,7 @@ class Prediction:
     db_delay: float
     cur_delay: float
     arr_planned: str
+    run_id: str = ""
 
 
 def _inputs(state: LiveState, now: datetime) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
@@ -279,6 +280,7 @@ def predict(
     stations: list[Station],
     history: list[Path],
     now_utc: datetime,
+    run_id: str = "",
 ) -> list[Prediction]:
     now = berlin(now_utc)
     targets, departed = _inputs(state, now)
@@ -325,6 +327,7 @@ def predict(
                     db_delay=round(float(db_delay), 2),
                     cur_delay=round(float(cur), 2),
                     arr_planned=planned.isoformat(timespec="minutes"),
+                    run_id=run_id,
                 )
             )
     return out

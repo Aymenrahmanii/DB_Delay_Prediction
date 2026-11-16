@@ -128,7 +128,7 @@ def _tables_dir(settings: Settings) -> Path:
     return settings.data_dir / "tables"
 
 
-def cmd_build_tables(settings: Settings, _: argparse.Namespace) -> int:
+def cmd_build_tables(settings: Settings, args: argparse.Namespace) -> int:
     try:
         import pyarrow  # noqa: F401
     except ImportError:
@@ -136,7 +136,7 @@ def cmd_build_tables(settings: Settings, _: argparse.Namespace) -> int:
     from dbdelay.tables import build_tables
 
     started = time.monotonic()
-    stats = build_tables(settings.raw_dir, _tables_dir(settings))
+    stats = build_tables(settings.raw_dir, _tables_dir(settings), args.days)
     print(
         f"plan responses {stats.plan_records}, change responses {stats.change_records}, "
         f"unparseable {stats.bad_records}\n"
@@ -317,7 +317,8 @@ def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from dbdelay.web.app import build_live, create_app
+        from dbdelay.site import build_live
+        from dbdelay.web.app import create_app
     except ImportError:
         sys.exit("Install the web and analysis groups: uv sync --group web --group analysis")
     replay = datetime.fromisoformat(args.replay_at).astimezone(UTC) if args.replay_at else None
@@ -326,6 +327,44 @@ def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
         print(f"replaying collected data from {replay:%Y-%m-%d %H:%M} UTC")
     print(f"serving forecasts of run {live.run_id} on http://{args.host}:{args.port}")
     uvicorn.run(create_app(live), host=args.host, port=args.port)
+    return 0
+
+
+def cmd_replay(settings: Settings, args: argparse.Namespace) -> int:
+    from datetime import time as clock_time
+
+    from dbdelay.ops import replay_day
+
+    for d in args.days:
+        started = time.monotonic()
+        made = replay_day(
+            settings,
+            date.fromisoformat(d),
+            args.step_min,
+            clock_time.fromisoformat(args.start),
+            clock_time.fromisoformat(args.end),
+            args.run,
+        )
+        print(f"{d}: {made} forecasts replayed ({time.monotonic() - started:.0f} s)")
+    return 0
+
+
+def cmd_score(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay.ops import score_pending
+    from dbdelay.score import load_scores, totals
+
+    today = utcnow().astimezone(BERLIN).date()
+    for s in score_pending(settings, args.source, today):
+        print(f"scored {s.day}: {s.forecasts} forecasts")
+    scores = load_scores(settings.data_dir / "scores", args.source)
+    print(f"\n{args.source} forecasts, {len(scores)} days scored, all days together:")
+    print("horizon       n  persistence     DB  model  vs DB  coverage")
+    for r in totals(scores, "with_db"):
+        print(
+            f"{r['horizon']:>4} min {r['n']:>7}       {_f(r['mae_persistence'])} "
+            f"{_f(r['mae_db'])} {_f(r['mae_model'])} {r['gain_vs_db']:+6.1%}    "
+            f"{r['coverage']:6.1%}"
+        )
     return 0
 
 
@@ -401,9 +440,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--sample", type=int, default=0)
     p.set_defaults(fn=cmd_archive_schema)
 
-    sub.add_parser("build-tables", help="parse the raw archive into Parquet tables").set_defaults(
-        fn=cmd_build_tables
-    )
+    p = sub.add_parser("build-tables", help="parse the raw archive into Parquet tables")
+    p.add_argument("--days", nargs="+", help="only these UTC days (YYYY-MM-DD), merged in")
+    p.set_defaults(fn=cmd_build_tables)
 
     p = sub.add_parser("archive-pull", help="save archive months for the 40 stations locally")
     p.add_argument("months", nargs="+", help="YYYY-MM")
@@ -428,6 +467,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="replay collected data from this moment, e.g. 2026-11-15T15:00+01:00",
     )
     p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("replay", help="run live forecasts over collected days, fast-forward")
+    p.add_argument("days", nargs="+", help="Berlin days, YYYY-MM-DD")
+    p.add_argument("--step-min", type=int, default=5)
+    p.add_argument("--start", default="05:00", help="Berlin time of the first cycle")
+    p.add_argument("--end", default="23:30", help="Berlin time of the last cycle")
+    p.add_argument("--run", help="run id of the models (default: the latest)")
+    p.set_defaults(fn=cmd_replay)
+
+    p = sub.add_parser("score", help="score finished days of logged forecasts (scoreboard)")
+    p.add_argument("--source", choices=["live", "replay"], default="live")
+    p.set_defaults(fn=cmd_score)
 
     p = sub.add_parser("baselines", help="actual times, snapshots and baseline errors")
     p.add_argument("--by-hour", action="store_true", help="also break errors down by hour")

@@ -244,15 +244,19 @@ def new_run_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
+def latest_run_id(runs_dir: Path) -> str | None:
+    runs = sorted(p.stem for p in runs_dir.glob("*.json"))
+    return runs[-1] if runs else None
+
+
 def load_run(runs_dir: Path, run_id: str | None = None) -> tuple[str, list[QuantileModel]]:
     """The models of a recorded run (the latest one by default)."""
     import lightgbm as lgb
 
     if run_id is None:
-        runs = sorted(p.stem for p in runs_dir.glob("*.json"))
-        if not runs:
+        run_id = latest_run_id(runs_dir)
+        if run_id is None:
             raise FileNotFoundError(f"no recorded run in {runs_dir}; run dbdelay train")
-        run_id = runs[-1]
     record = json.loads((runs_dir / f"{run_id}.json").read_text(encoding="utf-8"))
     models: list[QuantileModel] = []
     for name, info in record.get("models", {}).items():

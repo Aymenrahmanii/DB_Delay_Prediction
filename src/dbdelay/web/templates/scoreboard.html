@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Scoreboard · DB delay forecasts{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css">
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
+{% endblock %}
+{% block body %}
+<h2 style="font-size:20px;margin:4px 0">Scoreboard</h2>
+<p class="muted">
+  Mean absolute error of the arrival delay in minutes, forecasts made 15, 30, 60 and 90 minutes
+  before the train arrived; DB's forecast and persistence ("the delay stays") as they stood when
+  each forecast was made.
+  {% if b.source == "replay" %}<strong>Replayed days</strong>: forecasts made after the fact,
+  each with only the data fetched by its moment.
+  <a href="/scoreboard">Live forecasts</a>{% else %}
+  <a href="/scoreboard?source=replay">Replayed days</a>{% endif %}
+</p>
+
+{% if b.totals %}
+<h3 style="font-size:16px">All {{ b.days | length }} days</h3>
+<div class="scroll">
+<table>
+  <tr><th>Horizon</th><th class="num">Forecasts</th><th class="num">Persistence</th>
+      <th class="num db">DB</th><th class="num model">Model</th><th class="num">vs DB</th>
+      <th class="num">80 % range covers</th><th class="num">Model without DB</th></tr>
+  {% for r in b.totals %}
+  {% set w = b.totals_without_db[loop.index0] if b.totals_without_db | length > loop.index0 else none %}
+  <tr>
+    <td>{{ r.horizon }} min</td>
+    <td class="num">{{ r.n }}</td>
+    <td class="num">{{ "%.2f" % r.mae_persistence }}</td>
+    <td class="num db">{{ "%.2f" % r.mae_db }}</td>
+    <td class="num model">{{ "%.2f" % r.mae_model }}</td>
+    <td class="num">{{ "%+.1f %%" % (100 * r.gain_vs_db) }}</td>
+    <td class="num">{{ "%.1f %%" % (100 * r.coverage) }}</td>
+    <td class="num">{{ "%.2f" % w.mae_model if w else "" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+
+<div class="legend">
+  <span><span class="swatch" style="background:var(--db)"></span>DB's forecast</span>
+  <span><span class="swatch" style="background:var(--model)"></span>model</span>
+</div>
+<div class="muted">Error per day, 60 minutes ahead (minutes)</div>
+<div id="perDay" class="chart"></div>
+
+<h3 style="font-size:16px">Per day</h3>
+<div class="scroll">
+<table>
+  <tr><th>Day</th><th>Horizon</th><th class="num">Forecasts</th><th class="num db">DB</th>
+      <th class="num model">Model</th><th class="num">vs DB</th><th class="num">Covers</th>
+      <th class="num">Late &gt;5: precision / recall, model</th><th class="num">DB</th></tr>
+  {% for d in b.days %}{% for r in d.rows %}
+  <tr>
+    <td>{{ d.day if loop.first else "" }}</td>
+    <td>{{ r.horizon }} min</td>
+    <td class="num">{{ r.n }}</td>
+    <td class="num db">{{ "%.2f" % r.mae_db }}</td>
+    <td class="num model">{{ "%.2f" % r.mae_model }}</td>
+    <td class="num">{{ "%+.1f %%" % (100 * (1 - r.mae_model / r.mae_db)) if r.mae_db else "" }}</td>
+    <td class="num">{{ "%.0f %%" % (100 * r.coverage) }}</td>
+    <td class="num">{{ "%.2f / %.2f" % (r.precision_model or 0, r.recall_model or 0) }}</td>
+    <td class="num">{{ "%.2f / %.2f" % (r.precision_db or 0, r.recall_db or 0) }}</td>
+  </tr>
+  {% endfor %}{% endfor %}
+</table>
+</div>
+
+<script>
+const days = {{ b.days | tojson }}.slice().reverse();
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const at60 = days.map((d) => d.rows.find((r) => r.horizon === 60) || {});
+function draw() {
+  const el = document.getElementById("perDay");
+  el.innerHTML = "";
+  const axis = { stroke: css("--muted"), grid: { stroke: css("--line") }, ticks: { stroke: css("--line") } };
+  new uPlot({
+    width: el.clientWidth, height: 220,
+    scales: { x: { time: false } },
+    axes: [{ ...axis, values: (u, v) => v.map((i) => days[i] ? days[i].day.slice(5) : "") }, axis],
+    series: [{}, { label: "DB", stroke: css("--db"), width: 2, points: { show: true } },
+             { label: "model", stroke: css("--model"), width: 2, points: { show: true } }],
+    legend: { show: false },
+  }, [days.map((_, i) => i), at60.map((r) => r.mae_db ?? null), at60.map((r) => r.mae_model ?? null)], el);
+}
+draw();
+window.addEventListener("resize", draw);
+</script>
+{% else %}
+<p>No scored days yet. Days are scored after 03:00 once forecasts were logged for them
+(<code>dbdelay score</code> does it by hand).</p>
+{% endif %}
+{% endblock %}

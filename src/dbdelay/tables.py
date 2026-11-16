@@ -19,7 +19,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,14 +51,28 @@ class BuildStats:
     days: list[str] = field(default_factory=list)
 
 
-def _hours(raw_dir: Path, endpoints: tuple[str, ...]) -> list[str]:
-    """``YYYY-MM-DD/HH`` partitions present for any of the endpoints, in order."""
+def _hours(raw_dir: Path, endpoints: tuple[str, ...], days: set[str] | None = None) -> list[str]:
+    """``YYYY-MM-DD/HH`` partitions present for any of the endpoints, in order, optionally
+    only those of the given days."""
     found: set[str] = set()
     for ep in endpoints:
         base = raw_dir / ep
         if base.is_dir():
-            found.update(f"{d.name}/{h.name}" for d in base.iterdir() for h in d.iterdir())
+            found.update(
+                f"{d.name}/{h.name}"
+                for d in base.iterdir()
+                if days is None or d.name in days
+                for h in d.iterdir()
+            )
     return sorted(found)
+
+
+def _around(days: list[str], before: int, after: int) -> set[str]:
+    out: set[str] = set()
+    for d in days:
+        day = date.fromisoformat(d)
+        out.update((day + timedelta(days=k)).isoformat() for k in range(-before, after + 1))
+    return out
 
 
 def _records(raw_dir: Path, endpoint: str, hour: str) -> Iterator[RawRecord]:
@@ -66,10 +80,12 @@ def _records(raw_dir: Path, endpoint: str, hour: str) -> Iterator[RawRecord]:
         yield from read_raw(f)
 
 
-def read_plan(raw_dir: Path, stats: BuildStats) -> dict[str, tuple[PlannedStop, str]]:
+def read_plan(
+    raw_dir: Path, stats: BuildStats, days: set[str] | None = None
+) -> dict[str, tuple[PlannedStop, str]]:
     """Long-distance planned stops by stop id, with the fetch time of the version kept."""
     plan: dict[str, tuple[PlannedStop, str]] = {}
-    for hour in _hours(raw_dir, ("plan",)):
+    for hour in _hours(raw_dir, ("plan",), days):
         for rec in _records(raw_dir, "plan", hour):
             if rec.status != 200:
                 continue
@@ -145,13 +161,17 @@ def _event_row(cols: dict[str, list[Any]], ch: StopChange, at: datetime, source:
 
 
 def iter_change_events(
-    raw_dir: Path, keep: set[str], stats: BuildStats, seen: dict[str, _Seen]
+    raw_dir: Path,
+    keep: set[str],
+    stats: BuildStats,
+    seen: dict[str, _Seen],
+    days: set[str] | None = None,
 ) -> Iterator[tuple[str, dict[str, list[Any]]]]:
     """Yields (UTC day, columns) per day of fetches. ``keep`` are the planned stop ids;
     stops outside it are kept only when the change marks them as a long-distance train."""
     day_cols: dict[str, list[Any]] = defaultdict(list)
     day = ""
-    for hour in _hours(raw_dir, ("fchg", "rchg")):
+    for hour in _hours(raw_dir, ("fchg", "rchg"), days):
         if hour[:10] != day:
             if day and day_cols:
                 yield day, day_cols
@@ -194,8 +214,11 @@ def iter_change_events(
         yield day, day_cols
 
 
-def build_tables(raw_dir: Path, out_dir: Path) -> BuildStats:
-    """Rebuild every table from scratch. Takes a few minutes for a week of raw data."""
+def build_tables(raw_dir: Path, out_dir: Path, days: list[str] | None = None) -> BuildStats:
+    """Rebuild every table from scratch (a few minutes for a week of raw data), or with
+    ``days`` (UTC, ``YYYY-MM-DD``) only those days' change events, merging their plans and
+    observations into the existing tables. The day before each is read too, so DB's view of
+    every stop is known when the day starts and repeated states are still dropped."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -203,25 +226,47 @@ def build_tables(raw_dir: Path, out_dir: Path) -> BuildStats:
     out_dir.mkdir(parents=True, exist_ok=True)
     events_dir = out_dir / EVENTS_DIR
     events_dir.mkdir(exist_ok=True)
-    for old in events_dir.glob("*.parquet"):
-        old.unlink()
+    incremental = days is not None and (out_dir / PLAN_FILE).exists()
+    if not incremental:
+        days = None
+        for old in events_dir.glob("*.parquet"):
+            old.unlink()
 
-    plan = read_plan(raw_dir, stats)
-    pq.write_table(pa.table(_plan_table(plan), schema=_plan_schema()), out_dir / PLAN_FILE)
+    # /plan partitions are Berlin slots: a day's trains are planned in the days around it.
+    plan = read_plan(raw_dir, stats, _around(days, 1, 1) if days else None)
+    plan_table = pa.table(_plan_table(plan), schema=_plan_schema())
+    if incremental:
+        plan_table = _merge(pq.read_table(out_dir / PLAN_FILE), plan_table)
+    pq.write_table(plan_table, out_dir / PLAN_FILE)
+    keep = set(plan_table.column("stop_id").to_pylist())
 
     seen: dict[str, _Seen] = {}
     obs: dict[str, list[Any]] = defaultdict(list)
-    for day, cols in iter_change_events(raw_dir, set(plan), stats, seen):
-        pq.write_table(pa.table(cols, schema=_events_schema()), events_dir / f"{day}.parquet")
-        stats.days.append(day)
+    read_days = _around(days, 1, 0) if days else None
+    for day, cols in iter_change_events(raw_dir, keep, stats, seen, read_days):
+        if days is None or day in days:
+            pq.write_table(pa.table(cols, schema=_events_schema()), events_dir / f"{day}.parquet")
+            stats.days.append(day)
         # Keep memory flat: a stop not seen for a day will not come back.
         cutoff = datetime.fromisoformat(day).replace(tzinfo=UTC) - timedelta(days=1)
         for sid in [k for k, v in seen.items() if v.last < cutoff]:
             _obs_row(obs, sid, seen.pop(sid))
     for sid, s in seen.items():
         _obs_row(obs, sid, s)
-    pq.write_table(pa.table(obs, schema=_obs_schema()), out_dir / OBS_FILE)
+    obs_table = pa.table(obs, schema=_obs_schema())
+    if incremental:
+        obs_table = _merge(pq.read_table(out_dir / OBS_FILE), obs_table)
+    pq.write_table(obs_table, out_dir / OBS_FILE)
     return stats
+
+
+def _merge(old: Any, new: Any) -> Any:
+    """Rows of ``old`` whose stop id is not in ``new``, then all of ``new``."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    keep = pc.invert(pc.is_in(old.column("stop_id"), value_set=new.column("stop_id")))
+    return pa.concat_tables([old.filter(keep).cast(new.schema), new])
 
 
 def _obs_row(obs: dict[str, list[Any]], stop_id: str, s: _Seen) -> None:

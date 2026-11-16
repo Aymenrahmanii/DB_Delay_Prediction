@@ -174,3 +174,27 @@ def test_same_instant_fetches_give_one_event(built: Settings) -> None:
         (datetime(2026, 11, 13, 12, 44),),  # noqa: DTZ001 - naive Berlin
         (datetime(2026, 11, 13, 12, 45),),  # noqa: DTZ001
     ]
+
+
+def test_incremental_build_adds_a_day(built: Settings) -> None:
+    tables = built.data_dir / "tables"
+    plan_before = (
+        duckdb.connect()
+        .execute(f"select count(*) from '{tables.as_posix()}/plan_stops.parquet'")
+        .fetchone()
+    )
+    nov13 = (tables / "change_events" / "2026-11-13.parquet").read_bytes()
+    nxt = datetime(2026, 11, 14, 9, 0, tzinfo=UTC)
+    _write(built, "fchg", MA, nxt, FCHG_MA.replace(b"2611131245", b"2611131249"))
+    stats = build_tables(built.raw_dir, tables, days=["2026-11-14"])
+    assert stats.days == ["2026-11-14"]
+    con = duckdb.connect()
+    ev = con.execute(
+        f"select stop_id, arr_changed from '{tables.as_posix()}/change_events/2026-11-14.parquet'"
+    ).fetchall()
+    assert ev == [(f"{ICE}-5", datetime(2026, 11, 13, 12, 49))]  # noqa: DTZ001
+    assert (tables / "change_events" / "2026-11-13.parquet").read_bytes() == nov13
+    plan_after = con.execute(
+        f"select count(*) from '{tables.as_posix()}/plan_stops.parquet'"
+    ).fetchone()
+    assert plan_after == plan_before
