@@ -1,9 +1,62 @@
 # DB Delay Prediction
 
-Predict how late a Deutsche Bahn long-distance train (ICE, IC, EC) will be at its next stops,
-15–90 minutes ahead, and score it against DB's own forecast published at the same moment.
+[![CI](https://github.com/Aymenrahmanii/DB_Delay_Prediction/actions/workflows/ci.yml/badge.svg)](https://github.com/Aymenrahmanii/DB_Delay_Prediction/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Data: DB, CC BY 4.0](https://img.shields.io/badge/data-Deutsche%20Bahn%20CC%20BY%204.0-red)
+
+**How late will this ICE be at its next stops, and can a model forecast that better than
+Deutsche Bahn itself?** This project collects DB's live data, trains forecasters on a year of
+history, serves a forecast for every running ICE, IC and EC train, and scores them every night
+against DB's own forecast made at the same moment.
 
 > Status: **model frozen on 16 November 2026; final test running on fresh days.**
+
+![How it works: DB's API, the collector, raw responses, tables; the archive, features as of t, quantile models, the live site; then who forecasts better](docs/img/how-it-works.gif)
+
+## What it does
+
+- **Collects** DB's Timetables API for 40 major stations whenever it runs: planned
+  stops, all changes, and recent changes every minute (about 19 requests a minute).
+- **Keeps every response** and turns it into tables: DB's forecast for each stop at every
+  moment, joined into trips across stations.
+- **Learns from a year of DB data** (the Hugging Face archive): LightGBM quantile models give a
+  delay forecast and an 80 % range for each coming stop, 15 to 90 minutes ahead, from what is
+  known at that moment only.
+- **Serves it live**: a page per train with DB's forecast next to the model's, updated every
+  30 seconds, and search by train number.
+- **Keeps itself honest**: a nightly scoreboard against DB and "the delay stays", a model
+  frozen before the final test, and a data bundle anyone can use to repeat the numbers.
+
+![The site: trains running now, a page per train with DB's forecast and the model's, and the scoreboard](docs/img/site.gif)
+
+## Quick start
+
+```bash
+uv sync --all-groups
+cp .env.example .env                       # DB API Marketplace client id and key
+uv run dbdelay collect --hours 4 --keep-awake
+uv run dbdelay serve                       # http://127.0.0.1:8000
+```
+
+No API key? Replay collected days, or repeat the published results from the data bundle:
+
+```bash
+uv run dbdelay serve --replay-at 2026-11-15T15:00+01:00
+uv run dbdelay reproduce dbdelay-final-data.zip
+```
+
+| Stage | Command | Module |
+|---|---|---|
+| Collect | `collect`, `health` | `collector.py`, `api.py`, `storage.py` |
+| Tables | `build-tables`, `trip`, `check` | `parse.py`, `tables.py`, `stops.py`, `checks.py` |
+| Baselines | `baselines` | `baselines.py` |
+| Train | `archive-pull`, `train` | `archive.py`, `features.py`, `model.py` |
+| Serve | `serve`, `replay` | `live.py`, `site.py`, `web/` |
+| Score | `score`, `freeze`, `final`, `bundle`, `reproduce` | `score.py`, `ops.py`, `final.py`, `bundle.py` |
+
+The sections below follow the eight weeks of the build, with the decisions and the numbers
+of each step.
 
 ## Results
 
