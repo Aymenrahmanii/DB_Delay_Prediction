@@ -3,7 +3,7 @@
 Predict how late a Deutsche Bahn long-distance train (ICE, IC, EC) will be at its next stops,
 15–90 minutes ahead, and score it against DB's own forecast published at the same moment.
 
-> Status: **week 2: parse and join.** Results table goes here in week 8.
+> Status: **week 3: ground truth and baselines.** Results table goes here in week 8.
 
 ## Week 1: the collector
 
@@ -106,6 +106,35 @@ exit with code 1; warnings are data facts.
 
 Sanity check: arrival delays at the 40 stations, 10/25/50/75/90th percentile, in minutes:
 archive October 2026 `0 / 1 / 5 / 18 / 37`, collector 12–16 November `0 / 1 / 6 / 19 / 40`.
+
+## Week 3: ground truth and baselines
+
+```bash
+uv run dbdelay baselines             # horizon back from the actual arrival (default)
+uv run dbdelay baselines --basis planned --by-hour
+```
+
+- **Actual arrival**: DB's last published arrival time among the changes seen no later than
+  5 min after the time they announced, kept only if the collector polled that station in the
+  10 min before. DB still moved the time afterwards for 0.5 % of stops (a limit of the method).
+- **Snapshots**: for each target stop and horizon h, the moment t = arrival − h. Every value is
+  as of t: DB's forecast is the latest change seen by t (planned if none), persistence is the
+  train's delay at the last collected stop it had already left. No poll of the target station
+  in the 10 min before t, no snapshot. Written to `data/tables/snapshots.parquet`.
+- All three baselines are scored on the same rows: trains already running at t.
+
+Mean absolute error of the arrival delay, minutes, 12–16 November 2026, 40 stations:
+
+| Horizon | Snapshots | Timetable | Persistence | DB's forecast |
+|---|---:|---:|---:|---:|
+| 15 min | 10,177 | 14.8 | 4.9 | **2.1** |
+| 30 min | 9,644 | 15.1 | 5.7 | **3.1** |
+| 60 min | 8,362 | 15.9 | 7.7 | **5.1** |
+| 90 min | 7,006 | 17.1 | 9.4 | **7.1** |
+
+DB's forecast is optimistic: trains arrive on average 1.1 min later than DB said 15 minutes
+before, and 6.0 min later 90 minutes before. Measured back from the *planned* arrival instead,
+DB's error is 4.0 / 5.2 / 7.2 / 8.9 min.
 
 ### The archive
 

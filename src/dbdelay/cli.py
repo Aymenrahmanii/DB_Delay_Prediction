@@ -228,6 +228,50 @@ def cmd_check(settings: Settings, args: argparse.Namespace) -> int:
     return 1 if any(not r.ok and r.level == "error" for r in results) else 0
 
 
+def _f(v: float | None) -> str:
+    return f"{v:6.2f}" if v is not None else "     -"
+
+
+def cmd_baselines(settings: Settings, args: argparse.Namespace) -> int:
+    from dbdelay import baselines as bl
+
+    con = duckdb.connect()
+    paths = bl.Paths(_tables_dir(settings), settings.poll_log_dir)
+    bl.build(con, paths, load_stations(settings.stations_file), basis=args.basis)
+
+    a = bl.actual_stats(con)
+    print(
+        f"target stops {a['stops']}: actual known {a['with_actual']}, cancelled "
+        f"{a['cancelled']}, not covered {a['not_covered']}; DB moved the time after the "
+        f"last word for {a['moved_after_share'] or 0:.1%}"
+    )
+    print("\nsnapshots per horizon (running = train already left a collected stop):")
+    for c in bl.coverage(con):
+        print(f"  {c['horizon']:>3} min  {c['snapshots']:>6}  running {c['running']:>6}")
+
+    print(
+        f"\nmean absolute error of the arrival delay, minutes; horizon back from the "
+        f"{args.basis} arrival; same rows for all three"
+    )
+    print("horizon       n  stops  timetable  persistence      DB  mean delay")
+    for r in bl.score(con):
+        print(
+            f"{r['horizon']:>4} min {r['n']:>7} {r['stops']:>6}     {_f(r['mae_timetable'])}"
+            f"       {_f(r['mae_persistence'])}  {_f(r['mae_db'])}      {_f(r['mean_delay'])}"
+        )
+    if args.by_hour:
+        print("\nby hour of planned arrival")
+        for r in bl.score(con, by="horizon, hour"):
+            print(
+                f"{r['horizon']:>4} min {r['hour']:02d}h {r['n']:>6}  {_f(r['mae_timetable'])}"
+                f"  {_f(r['mae_persistence'])}  {_f(r['mae_db'])}"
+            )
+    out = _tables_dir(settings) / "snapshots.parquet"
+    con.execute(f"copy snapshots to '{out.as_posix()}' (format parquet)")
+    print(f"\nwrote {out}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dbdelay")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -259,6 +303,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("build-tables", help="parse the raw archive into Parquet tables").set_defaults(
         fn=cmd_build_tables
     )
+
+    p = sub.add_parser("baselines", help="actual times, snapshots and baseline errors")
+    p.add_argument("--by-hour", action="store_true", help="also break errors down by hour")
+    p.add_argument(
+        "--basis",
+        choices=["actual", "planned"],
+        default="actual",
+        help="measure the horizon back from the actual or the planned arrival",
+    )
+    p.set_defaults(fn=cmd_baselines)
 
     p = sub.add_parser("trip", help="one trip stop by stop, planned and changed times")
     p.add_argument("train", nargs="?", default="", help='e.g. "ICE 597"')
